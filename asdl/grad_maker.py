@@ -1,3 +1,4 @@
+import copy
 from typing import Any, Tuple, Dict, Union, Callable
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -9,18 +10,18 @@ import torch.nn.functional as F
 
 from .utils import has_reduction
 
-try:
-    import functorch as ft
-    _is_functorch_available = True
-except ImportError:
-    ft = None
-    _is_functorch_available = False
 
-__all__ = ['GradientMaker', 'DummyObject', 'ft', 'LOSS_CROSS_ENTROPY', 'LOSS_MSE', 'LOSS_MVN_NLL']
+__all__ = [
+    "GradientMaker",
+    "DummyObject",
+    "LOSS_CROSS_ENTROPY",
+    "LOSS_MSE",
+    "LOSS_MVN_NLL",
+]
 
-LOSS_CROSS_ENTROPY = 'cross_entropy'
-LOSS_MSE = 'mse'
-LOSS_MVN_NLL = 'mvn_nll'
+LOSS_CROSS_ENTROPY = "cross_entropy"
+LOSS_MSE = "mse"
+LOSS_MVN_NLL = "mvn_nll"
 
 @dataclass
 class GetFirstItem:
@@ -368,14 +369,11 @@ class GradientMaker:
         return call()
 
     def _get_stateless_model_fn(self):
-        if not _is_functorch_available:
-            raise EnvironmentError('functorch is not available. Follow the installation guide '
-                                   'in https://pytorch.org/functorch/stable/.')
         if self._model_fn is None:
             raise ValueError('model_fn is not set. Call setup_model_call().')
         if not isinstance(self._model_fn, nn.Module):
             raise TypeError('model_fn has to be an object of torch.nn.Module.')
-        model_fn, params, buffers = ft.make_functional_with_buffers(self._model_fn)
+        model_fn, params, buffers = _make_functional_with_buffers(self._model_fn)
         return model_fn, params, buffers
 
     def _get_stateless_model_fn_params_only(self):
@@ -413,7 +411,7 @@ class GradientMaker:
 
     def _get_stateless_grad_fn_params_only(self, return_output=False):
         model_loss_fn, params = self._get_stateless_model_loss_fn_params_only(return_output=return_output)
-        grad_fn = ft.grad(model_loss_fn, has_aux=return_output)
+        grad_fn = torch.func.grad(model_loss_fn, has_aux=return_output)
         return grad_fn, params
 
     def _get_random_tangents(self):
@@ -499,20 +497,20 @@ class GradientMaker:
                 loss_args, loss_kwargs = split_args(loss_all_args, ref_loss_args, ref_loss_kwargs)
                 return self._loss_fn(*loss_args, **loss_kwargs)
 
-        grad_fn = ft.grad(model_loss_fn, argnums=0)
-        return ft.vmap(grad_fn, in_dims=(None,) + batch_dims)(params, *grad_args)
+        grad_fn = torch.func.grad(model_loss_fn, argnums=0)
+        return torch.func.vmap(grad_fn, in_dims=(None,) + batch_dims)(params, *grad_args)
 
     @torch.no_grad()
     def loss_hessian(self) -> Tuple[Tuple[Tensor, ...], ...]:
         model_loss_fn, params = self._get_stateless_model_loss_fn_params_only()
-        return ft.hessian(model_loss_fn)(params)
+        return torch.func.hessian(model_loss_fn)(params)
 
     @torch.no_grad()
     def loss_hvp(self, tangents=None, accumulate_grad=True) -> Tuple[Tensor, ...]:
         grad_fn, params = self._get_stateless_grad_fn_params_only()
         if tangents is None:
             tangents = self._get_random_tangents()
-        grads, hvps = ft.jvp(grad_fn, (params,), (tangents,))
+        grads, hvps = torch.func.jvp(grad_fn, (params,), (tangents,))
         if accumulate_grad:
             params = [p for p in self.model.parameters() if p.requires_grad]
             for param, grad in zip(params, grads):
@@ -525,7 +523,7 @@ class GradientMaker:
     @torch.no_grad()
     def logit_jacobian(self) -> Tuple[Tensor, ...]:
         logit_fn, params = self._get_stateless_logit_fn_params_only()
-        return ft.jacrev(logit_fn, argnums=0)(params)
+        return torch.func.jacrev(logit_fn, argnums=0)(params)
 
     @torch.no_grad()
     def logit_jvp(self, tangents=None, return_model_output=False) \
@@ -533,7 +531,7 @@ class GradientMaker:
         logit_fn, params = self._get_stateless_logit_fn_params_only()
         if tangents is None:
             tangents = self._get_random_tangents()
-        logits, jvp = ft.jvp(logit_fn, (params,), (tangents,))
+        logits, jvp = torch.func.jvp(logit_fn, (params,), (tangents,))
         if return_model_output:
             return jvp, logits
         else:
@@ -550,9 +548,9 @@ class GradientMaker:
         logit_fn, params = self._get_stateless_logit_fn_params_only()
         if tangents is None:
             tangents = self._get_random_tangents()
-        y, jvp = ft.jvp(logit_fn, (params,), (tangents,))
+        y, jvp = torch.func.jvp(logit_fn, (params,), (tangents,))
         if y.ndim != 2:  # n x c
-            raise ValueError(f'Number of output dimensions has to be 2. Got {y.ndim}.')
+            raise ValueError(f"Number of output dimensions has to be 2. Got {y.ndim}.")
         if data_size is None:
             data_size = y.shape[0]
         if loss_type == LOSS_CROSS_ENTROPY:
@@ -573,7 +571,7 @@ class GradientMaker:
                 cov = torch.bmm(chol, chol.mT)
                 return mean, cov
 
-            (mu, cov), (mu_jvp, cov_jvp) = ft.jvp(cov_transform, (y,), (jvp,))
+            (mu, cov), (mu_jvp, cov_jvp) = torch.func.jvp(cov_transform, (y,), (jvp,))
             with torch.no_grad():
                 # left-multiply jacobian-vector with predictive Fisher w.r.t. mean, cov
                 precision = mean_fim = torch.linalg.inv(cov)
@@ -606,12 +604,42 @@ class GradientMaker:
     def nvp(self, cotangents=None, return_model_output=False) \
             -> Union[Tensor, Tuple[Tensor, Tuple[Tensor, ...]]]:
         logit_fn, params = self._get_stateless_logit_fn_params_only()
-        y, vjp_fn = ft.vjp(logit_fn, params)
+        y, vjp_fn = torch.func.vjp(logit_fn, params)
         if cotangents is None:
             cotangents = (torch.randn_like(y),)
         vjp = vjp_fn(*cotangents)
-        nvp = ft.jvp(logit_fn, (params,), vjp)[1]
+        nvp = torch.func.jvp(logit_fn, (params,), vjp)[1]
         if return_model_output:
             return nvp, y
         else:
             return nvp
+
+
+def _make_functional_with_buffers(mod, disable_autograd_tracking=False):
+    # TODO: investigate usage, instead of blindly replacing make_functional_with_buffers
+    # https://gist.github.com/zou3519/7769506acc899d83ef1464e28f22e6cf
+    params_dict = dict(mod.named_parameters())
+    params_names = params_dict.keys()
+    params_values = tuple(params_dict.values())
+
+    buffers_dict = dict(mod.named_buffers())
+    buffers_names = buffers_dict.keys()
+    buffers_values = tuple(buffers_dict.values())
+
+    stateless_mod = copy.deepcopy(mod)
+    stateless_mod.to("meta")
+
+    def fmodel(new_params_values, new_buffers_values, *args, **kwargs):
+        new_params_dict = {
+            name: value for name, value in zip(params_names, new_params_values)
+        }
+        new_buffers_dict = {
+            name: value for name, value in zip(buffers_names, new_buffers_values)
+        }
+        return torch.func.functional_call(
+            stateless_mod, (new_params_dict, new_buffers_dict), args, kwargs
+        )
+
+    if disable_autograd_tracking:
+        params_values = torch.utils._pytree.tree_map(torch.Tensor.detach, params_values)
+    return fmodel, params_values, buffers_values
