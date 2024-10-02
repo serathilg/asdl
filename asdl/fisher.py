@@ -7,11 +7,12 @@ from torch import Tensor
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
+from torch.distributions.multivariate_normal import MultivariateNormal
 
 from .core import no_centered_cov
 from .operations import OperationContext
 from .utils import skip_param_grad
-from .grad_maker import GradientMaker, LOSS_CROSS_ENTROPY, LOSS_MSE
+from .grad_maker import LOSS_CROSS_ENTROPY, LOSS_MSE, LOSS_MVN_NLL, GradientMaker
 from .matrices import *
 from .vector import ParamVector, reduce_vectors
 from .mvp import power_method, stochastic_lanczos_quadrature, conjugate_gradient_method, quadratic_form
@@ -490,6 +491,28 @@ class FisherMCMSE(FisherMaker):
                     retain_graph=i < n_mc_samples - 1)
 
 
+class FisherMCMVN(FisherMaker):
+    """MC estimated Fisher for predictive Multivariate Normal."""
+
+    @property
+    def do_local_accumulate(self) -> bool:
+        return self.config.n_mc_samples > 1
+
+    def _fisher_loop(self, closure):
+        logits = self._logits
+        n_mc_samples = self.config.n_mc_samples
+        # logits is concatenation of mean, cholesky diag and cholesky lower
+        mvn = mvn_from_concat_params(logits)
+
+        for i in range(n_mc_samples):
+            with torch.no_grad():
+                targets = mvn.sample()
+            closure(
+                lambda: -mvn.log_prob(targets).sum() / n_mc_samples,
+                retain_graph=i < n_mc_samples - 1,
+            )
+
+
 class FisherEmp(FisherMaker):
     @property
     def do_local_accumulate(self) -> bool:
@@ -504,18 +527,51 @@ def get_fisher_maker(model: nn.Module, config: FisherConfig):
     fisher_type = config.fisher_type
     loss_type = config.loss_type
     if fisher_type not in _supported_types:
-        raise ValueError(f'Invalid fisher_type: {fisher_type}. {_supported_types} are supported.')
+        raise ValueError(
+            f"Invalid fisher_type: {fisher_type}. {_supported_types} are supported."
+        )
     if fisher_type == FISHER_EMP:
         return FisherEmp(model, config)
-    if loss_type not in [LOSS_CROSS_ENTROPY, LOSS_MSE]:
-        raise ValueError(f'Invalid loss_type: {loss_type}. {[LOSS_CROSS_ENTROPY, LOSS_MSE]} are supported.')
+    if loss_type not in [LOSS_CROSS_ENTROPY, LOSS_MSE, LOSS_MVN_NLL]:
+        raise ValueError(
+            f"Invalid loss_type: {loss_type}. "
+            f"{[LOSS_CROSS_ENTROPY, LOSS_MSE, LOSS_MVN_NLL]} are supported."
+        )
     if fisher_type == FISHER_EXACT:
         if loss_type == LOSS_CROSS_ENTROPY:
             return FisherExactCrossEntropy(model, config)
+        elif loss_type == LOSS_MVN_NLL:
+            raise NotImplementedError()
         else:
             return FisherExactMSE(model, config)
     else:
         if loss_type == LOSS_CROSS_ENTROPY:
             return FisherMCCrossEntropy(model, config)
+        elif loss_type == LOSS_MVN_NLL:
+            return FisherMCMVN(model, config)
         else:
             return FisherMCMSE(model, config)
+
+
+def mvn_from_concat_params(mean_choldiag_choltril: torch.Tensor) -> MultivariateNormal:
+    mean, scale_tril = mean_chol_from_concat_params(mean_choldiag_choltril)
+    return MultivariateNormal(loc=mean, scale_tril=scale_tril)
+
+
+def mean_chol_from_concat_params(
+    mean_choldiag_choltril: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    # concatenation of mean, cholesky diag and cholesky lower in th.tril_indices order.
+    # Has shape [..., k = n + n + (n-1)n/2], so solving quadratic 0.5 n^2 + 1.5n - k,
+    # n = -1.5 + sqrt(2.25 + 2k)
+    dim = -1.5 + np.sqrt(2.25 + 2 * mean_choldiag_choltril.shape[-1])
+    assert np.isclose(dim, int(dim))
+    dim = int(dim)
+    mean, chol_diag, chol_below_diag = torch.split(
+        mean_choldiag_choltril, [dim, dim, (dim - 1) * dim // 2], dim=-1
+    )
+    cholesky = torch.diag_embed(chol_diag)
+    row_inds, col_inds = torch.tril_indices(dim, dim, offset=-1, device=cholesky.device)
+    cholesky[..., row_inds, col_inds] = chol_below_diag
+
+    return (mean, cholesky)
