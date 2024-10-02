@@ -1,3 +1,4 @@
+from collections import defaultdict
 from typing import List, Union, Any
 
 import numpy as np
@@ -141,6 +142,8 @@ class NaturalGradientMaker(PreconditionedGradientMaker):
         self.grads = []
         self.packed_grads = []
 
+        self._ema_vec_weights = defaultdict(lambda: None)
+        self._ema_vec_biases = defaultdict(lambda: None)
 
     def get_fisher_from_model(self):
         """
@@ -536,6 +539,38 @@ class NaturalGradientMaker(PreconditionedGradientMaker):
             vec_weight.data.mul_(grad_scale)
             if vec_bias is not None:
                 vec_bias.data.mul_(grad_scale)
+        if self.config.raw_gradient_ema != _invalid_ema_decay:
+            has_bias = vec_bias is not None
+            # get old gradient ema
+            prev_weight_grad = self._ema_vec_weights[module]
+            # if first gradient, initalize ema with zero vectors
+            if prev_weight_grad is None:
+                prev_weight_grad = torch.zeros_like(vec_weight)
+                self._ema_vec_weights[module] = prev_weight_grad
+            # same for bias (if it exists)
+            if has_bias:
+                prev_bias_grad = self._ema_vec_biases[module]
+            if has_bias and prev_bias_grad is None:
+                prev_bias_grad = torch.zeros_like(vec_bias)
+                self._ema_vec_biases[module] = prev_bias_grad
+            # ema with the zero initialization bias correction of Adam, so convert decay
+            # to beta
+            beta = 1 - self.config.raw_gradient_ema
+            # inplace compute of new ema
+            vec_weight.mul_(1 - beta).add_(prev_weight_grad.mul(beta))
+            if has_bias:
+                vec_bias.mul_(1 - beta).add_(prev_bias_grad.mul(beta))
+            # store updated ema
+            prev_weight_grad.copy_(vec_weight)
+            if has_bias:
+                prev_bias_grad.copy_(vec_bias)
+            # inplace compute of bias correction
+            # first exponent is 1 but self.tate starts at 0
+            ema_history_length = self.state["step"] + 1
+            correction_factor = 1 / (1 - beta**ema_history_length)
+            vec_weight.mul_(correction_factor)
+            if has_bias:
+                vec_bias.mul_(correction_factor)
         if not use_inv or matrix.has_inv:
             kwargs = dict(vec_weight=vec_weight, vec_bias=vec_bias, use_inv=use_inv, inplace=True)
             if shape == SHAPE_KFE:

@@ -57,6 +57,9 @@ class PreconditioningConfig:
         ignore_modules (List[Any], optional): A list of Modules, Module classes
             (e.g., :obj:`torch.nn.Linear`), or (a part of) Module names (e.g., `"conv1"`, `"block2."`)
             to ignore for gradient preconditioning.
+        raw_gradient_ema (float, optional): The exponential moving average (ema) decay rate for the
+            raw gradient before preconditioning: \
+            :obj:`grad_ema = grad_ema * (1 - ema_decay) + grad_new * ema_decay`. (default: -1)
     """
     num_total_steps: int = None
     preconditioner_upd_interval: int = _default_interval
@@ -73,6 +76,7 @@ class PreconditioningConfig:
     damping: float = 1.e-7
     ema_decay: float = _invalid_value
     ignore_modules: List[Any] = None
+    raw_gradient_ema: float = _invalid_value
 
 
 class PreconditionedGradientMaker(GradientMaker):
