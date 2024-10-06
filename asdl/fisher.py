@@ -38,7 +38,6 @@ class FisherConfig:
     fisher_attr: str = 'fisher'
     fvp_attr: str = 'fvp'
     ignore_modules: List[Any] = None
-    data_size: int = _invalid_data_size
     scale: float = 1.
     is_distributed: bool = False
     all_reduce: bool = False
@@ -68,7 +67,6 @@ class FisherMaker(GradientMaker):
         raise NotImplementedError
 
     def forward_and_backward(self,
-                             data_size=_invalid_data_size,
                              scale=None,
                              accumulate=False,
                              calc_loss_grad=False,
@@ -87,10 +85,12 @@ class FisherMaker(GradientMaker):
             fisher_shapes = [fisher_shapes]
         ignore_modules = config.ignore_modules
         seed = config.seed
+        data_size = self._batch_size
         if data_size == _invalid_data_size:
-            data_size = config.data_size  # refer config value (default: _invalid_data_size)
-        if data_size == _invalid_data_size:
-            raise ValueError('data_size is not specified.')
+            raise ValueError(
+                "batch_size has not been specified."
+                "Call setup_model_call() before calling forward_and_backward()"
+            )
         if scale is None:
             scale = config.scale  # refer config value (default: 1)
         scale /= data_size

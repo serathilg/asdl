@@ -29,7 +29,7 @@ with one by `<ASDL>` with :ref:`KfacGradientMaker <kfac_maker>` like the followi
     optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
 
     # Initialize KfacGradientMaker
-    config = PreconditioningConfig(data_size=batch_size, damping=0.01)
+    config = PreconditioningConfig(damping=0.01)
     gm = KfacGradientMaker(model, config)
 
     # Training loop
@@ -42,7 +42,7 @@ with one by `<ASDL>` with :ref:`KfacGradientMaker <kfac_maker>` like the followi
         # loss.backward()
 
         # <ASDL> ('preconditioned' gradient calculation)
-        dummy_y = gm.setup_model_call(model, x)
+        dummy_y = gm.setup_model_call(batch_size, model, x)
         gm.setup_loss_call(F.mse_loss, dummy_y, t)
         y, loss = gm.forward_and_backward()
 

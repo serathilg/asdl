@@ -15,7 +15,7 @@ class TestGradientMaker:
 
     @pytest.mark.parametrize('loss_type', [LOSS_CROSS_ENTROPY, LOSS_MSE])
     @pytest.mark.parametrize('network_type', ['mlp'])
-    def test_logits(self, model, loss_fn, multi_data):
+    def test_logits(self, model, loss_fn, multi_data, batch_size):
         """
         the model returns logits only
         """
@@ -31,7 +31,7 @@ class TestGradientMaker:
 
         # forward and backward by GradientMaker
         model.zero_grad()
-        dummy_y = grad_maker.setup_model_call(model, x)
+        dummy_y = grad_maker.setup_model_call(batch_size, model, x)
         grad_maker.setup_loss_call(loss_fn, dummy_y, t)
         y_test, loss_test = grad_maker.forward_and_backward()
         g_test = parameters_to_vector([p.grad for p in model.parameters()])
@@ -42,7 +42,7 @@ class TestGradientMaker:
 
     @pytest.mark.parametrize('loss_type', [LOSS_CROSS_ENTROPY, LOSS_MSE])
     @pytest.mark.parametrize('network_type', ['mlp'])
-    def test_tuple(self, model, loss_fn, multi_data):
+    def test_tuple(self, model, loss_fn, multi_data, batch_size):
         """
         the model returns a tuple (logits, loss)
         """
@@ -58,7 +58,7 @@ class TestGradientMaker:
 
         # forward and backward by GradientMaker
         model.zero_grad()
-        dummy_y = grad_maker.setup_model_call(model, x, t)
+        dummy_y = grad_maker.setup_model_call(batch_size, model, x, t)
         grad_maker.setup_loss_repr(dummy_y[1])
         y, loss_test = grad_maker.forward_and_backward()
         logits_test, _ = y
@@ -69,7 +69,7 @@ class TestGradientMaker:
         torch.testing.assert_close(g_true, g_test)
 
     @pytest.mark.parametrize('seq_len', [8])
-    def test_sequence_output(self, sequence_model, sequence_data):
+    def test_sequence_output(self, sequence_model, sequence_data, batch_size):
         """
         the model returns Output class instance
         """
@@ -87,7 +87,7 @@ class TestGradientMaker:
 
         # forward and backward by GradientMaker
         model.zero_grad()
-        dummy_y = grad_maker.setup_model_call(model, x)
+        dummy_y = grad_maker.setup_model_call(batch_size, model, x)
         grad_maker.setup_loss_call(F.cross_entropy, dummy_y.logits.view(-1, dummy_y.logits.size(-1)), t.view(-1), ignore_index=-1)
         y_test, loss_test = grad_maker.forward_and_backward()
         logits_test = y_test.logits
@@ -98,7 +98,7 @@ class TestGradientMaker:
         torch.testing.assert_close(g_true, g_test)
 
     @pytest.mark.parametrize('seq_len', [8])
-    def test_sequence_tuple(self, sequence_model, sequence_data):
+    def test_sequence_tuple(self, sequence_model, sequence_data, batch_size):
         """
         the model returns a tuple (loss, logits)
         """
@@ -115,7 +115,7 @@ class TestGradientMaker:
 
         # forward and backward by GradientMaker
         model.zero_grad()
-        dummy_y = grad_maker.setup_model_call(model, x, t, return_dict=False)
+        dummy_y = grad_maker.setup_model_call(batch_size, model, x, t, return_dict=False)
         grad_maker.setup_loss_repr(dummy_y[0])
         y, loss_test = grad_maker.forward_and_backward()
         _, logits_test = y

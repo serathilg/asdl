@@ -27,7 +27,7 @@ with :ref:`PreconditioningConfig <prec_config>`, which defines the behavior of g
 
 .. code-block:: python
 
-    config = PreconditioningConfig(damping=0.01, data_size=batch_size)
+    config = PreconditioningConfig(damping=0.01)
     gm = XXXGradientMaker(model, config, *args, **kwargs)  # XXX: algorithm name
 
 And every PreconditionedGradientMaker works with *the unified interface* (:ref:`GradientMaker <grad_maker>`):
@@ -35,7 +35,7 @@ And every PreconditionedGradientMaker works with *the unified interface* (:ref:`
 .. code-block:: python
 
     # preconditioned gradient calculation
-    dummy_y = gm.setup_model_call(model, x)
+    dummy_y = gm.setup_model_call(batch_size, model, x)
     gm.setup_loss_call(F.mse_loss, dummy_y, t)
     y, loss = gm.forward_and_backward()
 

@@ -23,6 +23,9 @@ LOSS_CROSS_ENTROPY = "cross_entropy"
 LOSS_MSE = "mse"
 LOSS_MVN_NLL = "mvn_nll"
 
+_invalid_data_size = -1
+
+
 @dataclass
 class GetFirstItem:
     pass
@@ -158,8 +161,11 @@ class GradientMaker:
         self._loss: Tensor = None
         self._dummy_loss: DummyObject = None
         self._dummy_logits = DummyObject([GetFirstItem()])
+        self._batch_size: int = _invalid_data_size
 
-    def setup_model_call(self, model_fn: Callable, *args, **kwargs) -> DummyObject:
+    def setup_model_call(
+        self, batch_size: int, model_fn: Callable, *args, **kwargs
+    ) -> DummyObject:
         """Setups a function to be called in :obj:`call_model()`.
         `*args` and `**kwargs` will be passed when `model_fn` is called.
 
@@ -173,11 +179,13 @@ class GradientMaker:
             >>> model = YourModule()
             >>> for x, t in data_loader:
             >>>     # if YourModule takes only inputs
-            >>>     grad_maker.setup_model_call(model, x)
+            >>>     grad_maker.setup_model_call(batch_size, model, x)
             >>>
             >>>     # if YourModule takes both inputs and targets
-            >>>     grad_maker.setup_model_call(model, x, target=t)
+            >>>     grad_maker.setup_model_call(batch_size, model, x, target=t)
         """
+        assert batch_size >= 1
+        self._batch_size = batch_size
         self._model_fn = model_fn
         self._model_args = args
         self._model_kwargs = kwargs
@@ -196,7 +204,7 @@ class GradientMaker:
             loss_fn (Callable): e.g., :obj:`torch.nn.functional.cross_entropy`
 
         Example:
-            >>> dummy_y = grad_maker.setup_model_call(model, x)
+            >>> dummy_y = grad_maker.setup_model_call(batch_size, model, x)
             >>> grad_maker.setup_loss_call(F.cross_entropy, dummy_y, t, label_smoothing=0.1, ignore_index=-1)
         """
         self._loss_fn = loss_fn
@@ -216,7 +224,7 @@ class GradientMaker:
             dummy_loss (DummyObject): e.g., output of :obj:`setup_model_call()` or its manipulation.
 
         Example:
-            >>> dummy_y = grad_maker.setup_model_call(model, x)
+            >>> dummy_y = grad_maker.setup_model_call(batch_size, model, x)
             >>> grad_maker.setup_loss_repr(dummy_y[1].sum())
         """
         if not isinstance(dummy_loss, DummyObject):
@@ -231,7 +239,7 @@ class GradientMaker:
             dummy_logits (DummyObject): e.g., output of :obj:`setup_model_call()` or its manipulation.
 
         Example:
-            >>> dummy_y = grad_maker.setup_model_call(model, x)
+            >>> dummy_y = grad_maker.setup_model_call(batch_size, model, x)
             >>> grad_maker.setup_logits_repr(dummy_y[0])
         """
         if not isinstance(dummy_logits, DummyObject):
@@ -301,7 +309,7 @@ class GradientMaker:
             >>>     loss.backward()
             >>>
             >>>     # Gradient calculation by GradientMaker
-            >>>     dummy_y = grad_maker.setup_model_call(model, x)
+            >>>     dummy_y = grad_maker.setup_model_call(batch_size, model, x)
             >>>     grad_maker.setup_loss_call(F.mse_loss, dummy_y, t)
             >>>     y, loss = grad_maker.forward_and_backward()
         """
@@ -324,7 +332,7 @@ class GradientMaker:
             >>> grad_maker2 = GradientMaker(model)
             >>> grad_maker1.delegate_forward_and_backward(grad_maker2)
         """
-        other.setup_model_call(self._model_fn, *self._model_args, **self._model_kwargs)
+        other.setup_model_call(self._batch_size, self._model_fn, *self._model_args, **self._model_kwargs)
         if self._loss_fn is None:
             other.setup_loss_repr(self._dummy_loss)
         else:

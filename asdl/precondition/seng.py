@@ -12,8 +12,6 @@ from ..operations import OP_SKETCHED_GRAM
 
 __all__ = ['SengGradientMaker']
 
-_invalid_data_size = -1
-
 
 @dataclass
 class SketchedEmpFisherInfo:
@@ -47,8 +45,6 @@ class SengGradientMaker(PreconditionedGradientMaker):
     def __init__(self, model: nn.Module, config: PreconditioningConfig,
                  sketching_size: int = 256, truncated_rank: int = 16):
         super().__init__(model, config)
-        if config.data_size == _invalid_data_size:
-            raise ValueError('data_size is not set.')
         self._curvature_info: Dict[nn.Module, SketchedEmpFisherInfo] = {}
         self.sketching_size = sketching_size
         self.truncated_rank = truncated_rank
@@ -65,13 +61,13 @@ class SengGradientMaker(PreconditionedGradientMaker):
             self.backward()
             for module in self.module_dict.values():
                 data, sketches, indices, gram = cxt.sketched_inputs_outgrads_gram(module)
-                gram_inv = cholesky_inv(gram.div_(config.data_size), config.damping)
+                gram_inv = cholesky_inv(gram.div_(self._batch_size), config.damping)
                 self._curvature_info[module] = SketchedEmpFisherInfo(*data, *sketches, *indices, gram_inv)
         return rst
 
     @torch.no_grad()
     def precondition(self):
-        data_size = self.config.data_size
+        data_size = self._batch_size
         damping = self.config.damping
         for module, info in self._curvature_info.items():
             bias = module.bias is not None and module.bias.requires_grad
@@ -127,7 +123,7 @@ class SengGradientMaker(PreconditionedGradientMaker):
 
     def _teardown(self):
         with torch.no_grad():
-            self._loss /= self.config.data_size
+            self._loss /= self._batch_size
 
 
 def maybe_unsqueeze_to_3d(tensor: Tensor):

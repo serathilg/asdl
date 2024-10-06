@@ -42,7 +42,7 @@ logits1, loss1 = model1(x, targets=t)
 loss1.backward()
 
 # GradientMaker
-dummy_y = grad_maker.setup_model_call(model2, x, targets=t)
+dummy_y = grad_maker.setup_model_call(bs, model2, x, targets=t)
 grad_maker.setup_loss_repr(dummy_y[1])
 logits2, loss2 = grad_maker.forward_and_backward()
 
@@ -69,7 +69,7 @@ loss1 = F.cross_entropy(logits1, t)
 loss1.backward()
 
 # GradientMaker
-dummy_y = grad_maker.setup_model_call(model2, x)
+dummy_y = grad_maker.setup_model_call(bs, model2, x)
 grad_maker.setup_loss_call(F.cross_entropy, dummy_y, t)
 logits2, loss2 = grad_maker.forward_and_backward()
 
@@ -95,7 +95,7 @@ loss1, logits1 = model1(x, targets=t, flip=True)
 loss1.backward()
 
 # GradientMaker
-dummy_y = grad_maker.setup_model_call(model2, x, targets=t, flip=True)
+dummy_y = grad_maker.setup_model_call(bs, model2, x, targets=t, flip=True)
 grad_maker.setup_loss_repr(dummy_y[0])
 loss2, logits2 = grad_maker.forward_and_backward()
 

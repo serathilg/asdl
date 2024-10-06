@@ -18,7 +18,7 @@ model = Net()
 optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
 
 # Initialize KfacGradientMaker
-config = PreconditioningConfig(data_size=batch_size, damping=0.01)
+config = PreconditioningConfig(damping=0.01)
 gm = KfacGradientMaker(model, config)
 
 # Training loop
@@ -31,7 +31,7 @@ for x, t in data_loader:
   # loss.backward()
 
   # <ASDL> ('preconditioned' gradient calculation)
-  dummy_y = gm.setup_model_call(model, x)
+  dummy_y = gm.setup_model_call(batch_size, model, x)
   gm.setup_loss_call(loss_fn, dummy_y, t)
   y, loss = gm.forward_and_backward()
 

@@ -16,37 +16,37 @@ from asdl import ParamVector
 _target_modules = (nn.Linear, nn.Conv2d)
 
 
-def init_fisher_maker(fisher_type, fisher_shape, loss_type, model, loss_fn, data):
+def init_fisher_maker(fisher_type, fisher_shape, loss_type, model, loss_fn, data, batch_size):
     config = FisherConfig(fisher_type=fisher_type,
                           fisher_shapes=[fisher_shape],
-                          data_size=1,
                           loss_type=loss_type,
                           seed=1)
     fisher_maker = get_fisher_maker(model, config)
     x, t = data
-    dummy_y = fisher_maker.setup_model_call(model, x)
+    dummy_y = fisher_maker.setup_model_call(batch_size, model, x)
     fisher_maker.setup_loss_call(loss_fn, dummy_y, t)
     return fisher_maker
 
 
 @pytest.fixture
 def fisher_maker_single_data(fisher_type, fisher_shape, loss_type, model, loss_fn, single_data):
-    return init_fisher_maker(fisher_type, fisher_shape, loss_type, model, loss_fn, single_data)
+    return init_fisher_maker(fisher_type, fisher_shape, loss_type, model, loss_fn, single_data, batch_size=1)
 
 
 @pytest.fixture
 def fisher_maker_single_data_copy(fisher_type, fisher_shape, loss_type, model, loss_fn, single_data_copy):
-    return init_fisher_maker(fisher_type, fisher_shape, loss_type, model, loss_fn, single_data_copy)
+    # treat batch of copied single data as bs=1 to see correct scaling
+    return init_fisher_maker(fisher_type, fisher_shape, loss_type, model, loss_fn, single_data_copy, batch_size=1)
 
 
 @pytest.fixture
 def full_fisher_maker_single_data(fisher_type, loss_type, model, loss_fn, single_data):
-    return init_fisher_maker(fisher_type, SHAPE_FULL, loss_type, model, loss_fn, single_data)
+    return init_fisher_maker(fisher_type, SHAPE_FULL, loss_type, model, loss_fn, single_data, batch_size=1)
 
 
 @pytest.fixture
-def fisher_maker(fisher_type, fisher_shape, loss_type, model, loss_fn, multi_data):
-    return init_fisher_maker(fisher_type, fisher_shape, loss_type, model, loss_fn, multi_data)
+def fisher_maker(fisher_type, fisher_shape, loss_type, model, loss_fn, multi_data, batch_size):
+    return init_fisher_maker(fisher_type, fisher_shape, loss_type, model, loss_fn, multi_data, batch_size)
 
 
 @pytest.mark.parametrize('network_type', ['mlp', 'cnn'])
@@ -228,13 +228,28 @@ class TestFisherMaker:
         fisher_maker.forward_and_backward(scale=scale)
         self.compare_vs_first_call(model, fisher_shape, scale=scale)
 
-    def test_data_size(self, model, fisher_maker, fisher_shape):
+    @pytest.mark.parametrize('batch_size_factor', [32])
+    def test_batch_size(
+        self,
+        model,
+        fisher_maker,
+        fisher_shape,
+        multi_data,
+        loss_fn,
+        batch_size,
+        batch_size_factor,
+    ):
         self.first_call(model, fisher_maker, fisher_shape)
 
-        # 2nd call w/ data_size
-        data_size = 32
-        fisher_maker.forward_and_backward(data_size=data_size)
-        self.compare_vs_first_call(model, fisher_shape, scale=1/data_size)
+        x, t = multi_data
+        dummy_y = fisher_maker.setup_model_call(
+            batch_size * batch_size_factor, model, x
+        )
+        fisher_maker.setup_loss_call(loss_fn, dummy_y, t)
+
+        # 2nd call w/ adjusted (wrong) batch_size to see correct Fisher scaling
+        fisher_maker.forward_and_backward()
+        self.compare_vs_first_call(model, fisher_shape, scale=1 / batch_size_factor)
 
     def test_inv(self, model, fisher_maker, fisher_shape):
         damping = 1
@@ -327,15 +342,31 @@ class TestFisherMaker:
             # inv check
             torch.testing.assert_close(torch.eye(data.shape[0]), data @ model.fisher.inv)
 
-    def test_inv_data_size(self, model, fisher_maker, fisher_shape):
+    @pytest.mark.parametrize("batch_size_factor", [32])
+    def test_inv_data_size(
+        self,
+        model,
+        fisher_maker,
+        fisher_shape,
+        multi_data,
+        loss_fn,
+        batch_size,
+        batch_size_factor,
+    ):
         damping = 10
-        N = 10
+        N = batch_size_factor
 
         scaled_damping = damping * N * N if fisher_shape == SHAPE_KRON else damping * N
-        self.first_call(model, fisher_maker, fisher_shape, calc_inv=True, damping=scaled_damping)
+        self.first_call(
+            model, fisher_maker, fisher_shape, calc_inv=True, damping=scaled_damping
+        )
 
-        # 2nd call w/ data_scale
-        fisher_maker.forward_and_backward(data_size=N, calc_inv=True, damping=damping)
+        x, t = multi_data
+        dummy_y = fisher_maker.setup_model_call(batch_size * N, model, x)
+        fisher_maker.setup_loss_call(loss_fn, dummy_y, t)
+
+        # 2nd call w/ adjusted (wrong) batch_size to see correct inv Fisher scaling
+        fisher_maker.forward_and_backward(calc_inv=True, damping=damping)
         self.compare_vs_first_call(model, fisher_shape, scale=N, inv=True)
 
     def test_fvp(self, model, fisher_maker, fisher_shape):

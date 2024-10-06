@@ -17,7 +17,6 @@ from .prec_grad_maker import PreconditionedGradientMaker, PreconditioningConfig
 
 _normalizations = (nn.BatchNorm1d, nn.BatchNorm2d)
 _invalid_ema_decay = -1
-_invalid_data_size = -1
 _module_level_shapes = [SHAPE_LAYER_WISE, SHAPE_KRON, SHAPE_SWIFT_KRON, SHAPE_KFE, SHAPE_UNIT_WISE, SHAPE_DIAG]
 
 __all__ = [
@@ -408,7 +407,6 @@ class NaturalGradientMaker(PreconditionedGradientMaker):
             self._scale_fisher(1 - ema_decay)
 
         self.delegate_forward_and_backward(fisher_maker,
-                                           data_size=self.config.data_size,
                                            scale=scale,
                                            accumulate=self.do_accumulate,
                                            calc_loss_grad=True,

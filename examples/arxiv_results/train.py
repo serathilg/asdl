@@ -127,7 +127,7 @@ def train(epoch):
         model.train()
         x, t = x.to(device), t.to(device)
         optimizer.zero_grad(set_to_none=True)
-        dummy_y = grad_maker.setup_model_call(model, x)
+        dummy_y = grad_maker.setup_model_call(args.batch_size, model, x)
         grad_maker.setup_loss_call(F.cross_entropy, dummy_y, t, label_smoothing=args.label_smoothing)
         y, loss = grad_maker.forward_and_backward()
         if args.gradient_clipping:
@@ -355,14 +355,14 @@ if __name__=='__main__':
     else:
         optimizer = torch.optim.SGD(model.parameters(), lr=args.lr,momentum=args.momentum, weight_decay=args.weight_decay,nesterov = args.nesterov)
 
-    config = asdl.PreconditioningConfig(data_size=args.batch_size,
-                                    damping=args.damping,
-                                    ema_decay = args.ema_decay,
-                                    preconditioner_upd_interval=args.curvature_update_interval,
-                                    curvature_upd_interval=args.curvature_update_interval,
-                                    ignore_modules=[nn.BatchNorm1d,nn.BatchNorm2d,nn.BatchNorm3d,nn.LayerNorm]
-                                    )
-                                    
+    config = asdl.PreconditioningConfig(
+        damping=args.damping,
+        ema_decay=args.ema_decay,
+        preconditioner_upd_interval=args.curvature_update_interval,
+        curvature_upd_interval=args.curvature_update_interval,
+        ignore_modules=[nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d, nn.LayerNorm],
+    )
+
     if args.optim == OPTIM_KFAC_MC:
         grad_maker = asdl.KfacGradientMaker(model, config)
     elif args.optim == OPTIM_SHAMPOO:

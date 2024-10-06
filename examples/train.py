@@ -51,7 +51,7 @@ def train(epoch):
         # loss = F.cross_entropy(y, t)
         # loss.backward()
 
-        dummy_y = grad_maker.setup_model_call(model, x)
+        dummy_y = grad_maker.setup_model_call(args.batch_size, model, x)
         grad_maker.setup_loss_call(F.cross_entropy, dummy_y, t)
         y, loss = grad_maker.forward_and_backward()
 
@@ -157,7 +157,7 @@ if __name__ == '__main__':
     else:
         optimizer = optim.SGD(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
-    config = asdl.PreconditioningConfig(data_size=args.batch_size, damping=args.damping)
+    config = asdl.PreconditioningConfig(damping=args.damping)
 
     if args.optim == OPTIM_KFAC:
         grad_maker = asdl.KfacGradientMaker(model, config)

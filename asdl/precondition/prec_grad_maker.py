@@ -47,8 +47,6 @@ class PreconditioningConfig:
             (:obj:`num_total_steps`). (default: 0.)
         curvature_interval_type (str, optional)): The name of curvature update interval
             schedule: `"constant"`, `"step"`, `"linear"`. (default: `"constant"`)
-        data_size (int, optional): The size of data to be used for averaging curvature information.
-            (default: -1)
         damping (float, optional): The damping value. An identity matrix multiplied by the damping
             value will be added to the curvature matrix before taking its inverse. (default: 1.e-7)
         ema_decay (float, optional): The exponential moving average (ema) decay rate for the curvature
@@ -72,7 +70,6 @@ class PreconditioningConfig:
     curvature_upd_ratio: float = None
     curvature_warmup_ratio: float = 0.
     curvature_interval_type = INTERVAL_CONSTANT
-    data_size: int = _invalid_value
     damping: float = 1.e-7
     ema_decay: float = _invalid_value
     ignore_modules: List[Any] = None

@@ -95,7 +95,7 @@ Case1: *torch.Tensor* output
     loss.backward()
 
     # <ASDL>
-    dummy_y = gm.setup_model_call(model, x)
+    dummy_y = gm.setup_model_call(batch_size, model, x)
     gm.setup_loss_call(loss_fn, dummy_y, t)
     y, loss = gm.forward_and_backward()
 
@@ -126,7 +126,7 @@ Case2: Sequence (e.g., tuple, list) output
     loss.backward()
 
     # <ASDL>
-    dummy_y = gm.setup_model_call(model, x, t)
+    dummy_y = gm.setup_model_call(batch_size, model, x, t)
     gm.setup_loss_repr(loss_fn, dummy_y[1])
     y, loss = gm.forward_and_backward()
 
@@ -151,7 +151,7 @@ Case 3: Mapping (e.g., dict) output
     loss.backward()
 
     # <ASDL>
-    dummy_y = gm.setup_model_call(model, x, t)
+    dummy_y = gm.setup_model_call(batch_size, model, x, t)
     gm.setup_loss_repr(dummy_y["loss"])
     y, loss = gm.forward_and_backward()
 
@@ -172,7 +172,7 @@ Case 4: *dataclass* output
     loss.backward()
 
     # <ASDL>
-    dummy_y = gm.setup_model_call(model, x, t)
+    dummy_y = gm.setup_model_call(batch_size, model, x, t)
     gm.setup_loss_repr(dummy_y.loss)
     y, loss = gm.forward_and_backward()
 
@@ -198,7 +198,7 @@ Case 5: Complex operations on output
     loss.backward()
 
     # <ASDL>
-    dummy_y = gm.setup_model_call(model, x)
+    dummy_y = gm.setup_model_call(batch_size, model, x)
     gm.setup_loss_call(F.cross_entropy,
                        dummy_y.view(-1, dummy_y.size(-1)),
                        t.view(-1),

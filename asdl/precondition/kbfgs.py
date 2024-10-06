@@ -115,7 +115,7 @@ class KronBfgsGradientMaker(PreconditionedGradientMaker):
                 s, As = cxt.bfgs_kron_s_As(module)
                 y = As + damping * s
             else:
-                new_bfgs = cxt.cov_symmatrix(module, pop=True).mul_(1/config.data_size)
+                new_bfgs = cxt.cov_symmatrix(module, pop=True).mul_(1/self._batch_size)
                 if bfgs is None:
                     setattr(module, self.bfgs_attr, new_bfgs)
                     bfgs = new_bfgs

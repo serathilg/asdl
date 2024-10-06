@@ -46,7 +46,7 @@ class SmwEmpNaturalGradientMaker(GradientMaker):
         else:
             data_average = self._loss_fn_kwargs.get('reduction', 'mean') == 'mean'
         model = self.model
-        n = self.config.data_size
+        n = self._batch_size
         damping = self.config.damping
 
         with extend(model, OP_GRAM_HADAMARD):
