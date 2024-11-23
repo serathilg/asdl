@@ -452,12 +452,25 @@ class FisherMCCrossEntropy(FisherMaker):
         probs = F.softmax(logits, dim=-1)
         log_probs = F.log_softmax(logits, dim=-1)
         dist = torch.distributions.Categorical(probs)
+
+        with torch.no_grad():
+            targets = dist.sample((n_mc_samples,))
+            # Fisher is mean of outer product of log prob gradients. closure will just
+            # sum the outer products (into whatever approximate form), so each gradient
+            # has to be scaled. Each outer product should have weight 1 / n_mc_samples
+            # but outer product squares weighting of gradient, so scaled by sqrt.
+            scaling = 1 / np.sqrt(n_mc_samples)
         for i in range(n_mc_samples):
-            with torch.no_grad():
-                targets = dist.sample()
-            closure(lambda: F.nll_loss(log_probs.view(-1, log_probs.size(-1)),
-                                       targets.view(-1), reduction='sum', ignore_index=self.config.ignore_index) / n_mc_samples,
-                    retain_graph=i < n_mc_samples - 1)
+            closure(
+                lambda: F.nll_loss(
+                    log_probs.view(-1, log_probs.size(-1)),
+                    targets[i].view(-1),
+                    reduction="sum",
+                    ignore_index=self.config.ignore_index,
+                )
+                * scaling,
+                retain_graph=i < n_mc_samples - 1,
+            )
 
 
 class FisherExactMSE(FisherMaker):
@@ -484,11 +497,19 @@ class FisherMCMSE(FisherMaker):
         n_mc_samples = self.config.n_mc_samples
         var = self.config.var
         dist = torch.distributions.normal.Normal(logits, scale=np.sqrt(var))
+
+        with torch.no_grad():
+            targets = dist.sample((n_mc_samples,))
+            # Fisher is mean of outer product of log prob gradients. closure will just
+            # sum the outer products (into whatever approximate form), so each gradient
+            # has to be scaled. Each outer product should have weight 1 / n_mc_samples
+            # but outer product squares weighting of gradient, so scaled by sqrt.
+            scaling = 1 / np.sqrt(n_mc_samples)
         for i in range(n_mc_samples):
-            with torch.no_grad():
-                targets = dist.sample()
-            closure(lambda: 0.5 * F.mse_loss(logits, targets, reduction='sum') / n_mc_samples,
-                    retain_graph=i < n_mc_samples - 1)
+            closure(
+                lambda: 0.5 * F.mse_loss(logits, targets[i], reduction="sum") * scaling,
+                retain_graph=i < n_mc_samples - 1,
+            )
 
 
 class FisherMCMVN(FisherMaker):
@@ -504,11 +525,16 @@ class FisherMCMVN(FisherMaker):
         # logits is concatenation of mean, cholesky diag and cholesky lower
         mvn = mvn_from_concat_params(logits)
 
+        with torch.no_grad():
+            targets = mvn.sample((n_mc_samples,))
+            # Fisher is mean of outer product of log prob gradients. closure will just
+            # sum the outer products (into whatever approximate form), so each gradient
+            # has to be scaled. Each outer product should have weight 1 / n_mc_samples
+            # but outer product squares weighting of gradient, so scaled by sqrt.
+            scaling = 1 / np.sqrt(n_mc_samples)
         for i in range(n_mc_samples):
-            with torch.no_grad():
-                targets = mvn.sample()
             closure(
-                lambda: -mvn.log_prob(targets).sum() / n_mc_samples,
+                lambda: -mvn.log_prob(targets[i]).sum() * scaling,
                 retain_graph=i < n_mc_samples - 1,
             )
 
