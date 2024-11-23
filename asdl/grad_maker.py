@@ -569,29 +569,13 @@ class GradientMaker:
                 loss_hessian_wrt_logit = diag_p - ppt  # n x c x c
                 grad_outputs = torch.einsum("bij,bj->bi", loss_hessian_wrt_logit, jvp)
         elif loss_type == LOSS_MVN_NLL:
-            # logit jvp is only w.r.t. concat params and we have closed form FIM w.r.t.
-            # mean and covariance, so another jvp and vjp needed
-            # import here to avoid circular import
-            from asdl.fisher import mean_chol_from_concat_params
+            from asdl.fisher import MVNOutput
 
-            def cov_transform(logits):
-                mean, chol = mean_chol_from_concat_params(logits)
-                cov = torch.bmm(chol, chol.mT)
-                return mean, cov
-
-            (mu, cov), (mu_jvp, cov_jvp) = torch.func.jvp(cov_transform, (y,), (jvp,))
-            with torch.no_grad():
-                # left-multiply jacobian-vector with predictive Fisher w.r.t. mean, cov
-                precision = mean_fim = torch.linalg.inv(cov)
-                grad_mu = torch.bmm(mean_fim, mu_jvp.unsqueeze(-1)).squeeze(-1)
-                # FIM wrt vectorized cov is 0.5 * kronecker of precision, use Kronecker
-                # rule vec(prec @ cov_jvp @ prec) = (prec x prec) @ vec(cov_jvp)
-                grad_cov = 0.5 * torch.bmm(precision, torch.bmm(cov_jvp, precision))
-            grad_outputs = torch.autograd.grad(
-                (mu, cov), y, grad_outputs=(grad_mu, grad_cov)
+            assert isinstance(self._model_output, MVNOutput)
+            grad_outputs = self._model_output.logits_type.logits_fvp(
+                logits=y, vector=jvp
             )
-            # don't want tuple (grad wrt y,) but just value inside
-            grad_outputs = grad_outputs[0]
+
         else:
             grad_outputs = jvp
         fvp = torch.autograd.grad(y, params, grad_outputs=grad_outputs / data_size)

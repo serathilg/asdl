@@ -1,4 +1,4 @@
-from typing import List, Union, Any, Tuple
+from typing import List, Protocol, Union, Any, Tuple, runtime_checkable
 from dataclasses import dataclass
 import numpy as np
 
@@ -522,8 +522,8 @@ class FisherMCMVN(FisherMaker):
     def _fisher_loop(self, closure):
         logits = self._logits
         n_mc_samples = self.config.n_mc_samples
-        # logits is concatenation of mean, cholesky diag and cholesky lower
-        mvn = mvn_from_concat_params(logits)
+        assert isinstance(self._model_output, MVNOutput)
+        mvn = self._model_output.logits_type.to_mvn(logits)
 
         with torch.no_grad():
             targets = mvn.sample((n_mc_samples,))
@@ -579,25 +579,17 @@ def get_fisher_maker(model: nn.Module, config: FisherConfig):
             return FisherMCMSE(model, config)
 
 
-def mvn_from_concat_params(mean_choldiag_choltril: torch.Tensor) -> MultivariateNormal:
-    mean, scale_tril = mean_chol_from_concat_params(mean_choldiag_choltril)
-    return MultivariateNormal(loc=mean, scale_tril=scale_tril)
+@runtime_checkable
+class MVNLogitsType(Protocol):
+    def to_mvn(self, logits: torch.Tensor) -> MultivariateNormal: ...
+
+    def logits_fvp(self, logits: torch.Tensor, vector: torch.Tensor) -> torch.Tensor:
+        """Fisher-vector product using Fisher w.r.t. logits.
+
+        vector has shape and order of logits"""
+        ...
 
 
-def mean_chol_from_concat_params(
-    mean_choldiag_choltril: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    # concatenation of mean, cholesky diag and cholesky lower in th.tril_indices order.
-    # Has shape [..., k = n + n + (n-1)n/2], so solving quadratic 0.5 n^2 + 1.5n - k,
-    # n = -1.5 + sqrt(2.25 + 2k)
-    dim = -1.5 + np.sqrt(2.25 + 2 * mean_choldiag_choltril.shape[-1])
-    assert np.isclose(dim, int(dim))
-    dim = int(dim)
-    mean, chol_diag, chol_below_diag = torch.split(
-        mean_choldiag_choltril, [dim, dim, (dim - 1) * dim // 2], dim=-1
-    )
-    cholesky = torch.diag_embed(chol_diag)
-    row_inds, col_inds = torch.tril_indices(dim, dim, offset=-1, device=cholesky.device)
-    cholesky[..., row_inds, col_inds] = chol_below_diag
-
-    return (mean, cholesky)
+@runtime_checkable
+class MVNOutput(Protocol):
+    logits_type: MVNLogitsType
