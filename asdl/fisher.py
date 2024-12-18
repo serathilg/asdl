@@ -512,6 +512,46 @@ class FisherMCMSE(FisherMaker):
             )
 
 
+class FisherExactMVN(FisherMaker):
+    @property
+    def do_local_accumulate(self) -> bool:
+        if self._logits is not None:
+            assert isinstance(self._model_output, MVNOutput)
+            return self._model_output.logits_type.dim > 1
+        return True
+
+    def _fisher_loop(self, closure):
+        logits = self._logits
+        assert isinstance(self._model_output, MVNOutput)
+        mvn = self._model_output.logits_type.to_mvn(logits)
+        dim = self._model_output.logits_type.dim
+        with torch.no_grad():
+            L = mvn.scale_tril.detach()
+        # Backwards for Jacobian_mean^T cholesky(Fisher_mean) product.
+        # Semantically, we want to backward i'th column of L inverse at mean output.
+        # Need to convert to scalar loss with correct .backward() as we cant
+        # directly use torch.autograd.grad(..., grad_outputs=L_inv[...,i]).
+        # (Batch sum of) Dot product mean^T L_inv[:,i] has correct gradient but needs
+        # explicit inversion of L, instead d = mean^T L_inv <=> L_inv^T mean = d^T, so
+        # solve mean = L^T d^T.
+        d_T = torch.linalg.solve_triangular(L.mT, mvn.mean.unsqueeze(-1), upper=True)
+        for i in range(dim):
+            # d_T of shape [batch..., dim, 1], so d[...,i] are d_T.squeeze(-1)[...,i]
+            closure(lambda: d_T.squeeze(-1)[..., i].sum(), retain_graph=True)
+
+        # Backwards for Jacobian_vec(cov)^T cholesky(Fisher_vec(cov)) product.
+        # Semantically, we want to backward i'th column of (L kron L) inverse at
+        # vectorized covariance output. Instead solve vec(cov) = (L kron L)^T d^T
+        d_T = torch.linalg.solve_triangular(
+            kron(L, L).mT,
+            mvn.covariance_matrix.flatten(-2, -1).unsqueeze(-1),
+            upper=True,
+        )
+        for i in range(dim**2):
+            # d_T of shape [batch..., dim**2, 1], so d[...,i] are d_T.squeeze(-1)[...,i]
+            closure(lambda: d_T.squeeze(-1)[..., i].sum(), retain_graph=i < dim**2 - 1)
+
+
 class FisherMCMVN(FisherMaker):
     """MC estimated Fisher for predictive Multivariate Normal."""
 
@@ -567,7 +607,7 @@ def get_fisher_maker(model: nn.Module, config: FisherConfig):
         if loss_type == LOSS_CROSS_ENTROPY:
             return FisherExactCrossEntropy(model, config)
         elif loss_type == LOSS_MVN_NLL:
-            raise NotImplementedError()
+            return FisherExactMVN(model, config)
         else:
             return FisherExactMSE(model, config)
     else:
@@ -581,6 +621,8 @@ def get_fisher_maker(model: nn.Module, config: FisherConfig):
 
 @runtime_checkable
 class MVNLogitsType(Protocol):
+    dim: int
+
     def to_mvn(self, logits: torch.Tensor) -> MultivariateNormal: ...
 
     def logits_fvp(self, logits: torch.Tensor, vector: torch.Tensor) -> torch.Tensor:
@@ -593,3 +635,15 @@ class MVNLogitsType(Protocol):
 @runtime_checkable
 class MVNOutput(Protocol):
     logits_type: MVNLogitsType
+
+
+def kron(a, b):
+    """
+    Kronecker product of matrices a and b with leading batch dimensions.
+
+    https://gist.github.com/yulkang/4a597bcc5e9ccf8c7291f8ecb776382d
+    """
+    siz1 = torch.Size([a.shape[-2] * b.shape[-2], a.shape[-1] * b.shape[-1]])
+    res = a.unsqueeze(-1).unsqueeze(-3) * b.unsqueeze(-2).unsqueeze(-4)
+    siz0 = res.shape[:-4]
+    return res.reshape(siz0 + siz1)
