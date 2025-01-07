@@ -143,6 +143,7 @@ class NaturalGradientMaker(PreconditionedGradientMaker):
 
         self._ema_vec_weights = defaultdict(lambda: None)
         self._ema_vec_biases = defaultdict(lambda: None)
+        self.raw_gradients: dict[torch.Tensor, torch.Tensor] = {}
 
     def get_fisher_from_model(self):
         """
@@ -537,6 +538,10 @@ class NaturalGradientMaker(PreconditionedGradientMaker):
             vec_weight.data.mul_(grad_scale)
             if vec_bias is not None:
                 vec_bias.data.mul_(grad_scale)
+        if self.config.store_raw_gradient:
+            self.raw_gradients[module.weight] = vec_weight.clone()
+            if _bias_requires_grad(module):
+                self.raw_gradients[module.bias] = vec_bias.clone()
         if self.config.raw_gradient_ema != _invalid_ema_decay:
             has_bias = vec_bias is not None
             # get old gradient ema

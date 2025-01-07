@@ -58,6 +58,8 @@ class PreconditioningConfig:
         raw_gradient_ema (float, optional): The exponential moving average (ema) decay rate for the
             raw gradient before preconditioning: \
             :obj:`grad_ema = grad_ema * (1 - ema_decay) + grad_new * ema_decay`. (default: -1)
+        store_raw_gradient (bool, optional): Whether to save the raw (not preconditioned) gradient
+            for later access.
     """
     num_total_steps: int = None
     preconditioner_upd_interval: int = _default_interval
@@ -74,6 +76,7 @@ class PreconditioningConfig:
     ema_decay: float = _invalid_value
     ignore_modules: List[Any] = None
     raw_gradient_ema: float = _invalid_value
+    store_raw_gradient: bool = False
 
 
 class PreconditionedGradientMaker(GradientMaker):
