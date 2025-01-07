@@ -42,15 +42,18 @@ class ParamVector:
         return self.vectors.values()
 
     def __add__(self, other):
+        assert self._check_same_param_order(other)
         vectors = [v1 + v2 for v1, v2 in zip(self.values(), other.values())]
         return ParamVector(self.params(), vectors)
 
     def __iadd__(self, other):
+        assert self._check_same_param_order(other)
         for v1, v2 in zip(self.values(), other.values()):
             v1 += v2
         return self
 
     def add(self, other, alpha=1):
+        assert self._check_same_param_order(other)
         vectors = [v1.add(v2, alpha=alpha) for v1, v2 in zip(self.values(), other.values())]
         return ParamVector(self.params(), vectors)
 
@@ -72,8 +75,17 @@ class ParamVector:
             self.vectors[key].mul_(value)
         return self
 
-    def dot(self, other):
-        return torch.sum(self.get_flatten_vector().mul(other.get_flatten_vector()))
+    def dot(self, other, concat_first: bool = True):
+        assert self._check_same_param_order(other)
+        if concat_first:
+            return torch.dot(self.get_flatten_vector(), other.get_flatten_vector())
+        else:
+            return torch.stack(
+                [
+                    torch.dot(self_v.flatten(), other_v.flatten())
+                    for self_v, other_v in zip(self.values(), other.values())
+                ]
+            ).sum()
 
     def norm(self):
         return torch.norm(self.get_flatten_vector())
@@ -100,6 +112,17 @@ class ParamVector:
 
     def copy(self):
         return ParamVector(self.params(), [v.clone().detach() for v in self.values()])
+
+    def _check_same_param_order(self, other: "ParamVector") -> bool:
+        if len(self.vectors) != len(other.vectors):
+            return False
+        return all(
+            self_p is other_p for self_p, other_p in zip(self.params(), other.params())
+        )
+
+    @classmethod
+    def from_dict(cls, param_to_value: dict[torch.Tensor, torch.Tensor]):
+        return cls(param_to_value.keys(), param_to_value.values())
 
 
 def reduce_vectors(vectors: ParamVector, is_master=True, all_reduce=False) -> ParamVector:
