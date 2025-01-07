@@ -499,6 +499,27 @@ class Kron:
     def update_inv(self, damping=_default_damping, calc_A_inv=True, calc_B_inv=True, eps=1e-7, replace=False):
         if not self.has_data:
             raise ValueError('data do not exist.')
+        if damping < -1:
+            # consider damping as target maximum condition number
+            target_cond = -damping
+            # If condition number not already larger than target_cond, then find damping
+            # for which (eigv_largest + d) / (eigv_smallest + d) = target_cond.
+            # Eigenvalues of Kronecker product are the products of factors' eigenvalues.
+            # Factors A and B are real symmetric, so non-negative real eigenvalues.
+            # Find smallest and largest eigenvalue, eigv_smallest and eigv_largest as
+            # product of smallest and largest eigvals of A and B.
+            # Could do following:
+            # # Eigvalsh are in ascending order, so first is smallest and last largest.
+            # # Near zero eigval might be negative due to numerics, so abs() again but
+            # # ignore possibly wrong order now.
+            # eigv_smallest, eigv_largest = (
+            #     torch.linalg.eigvalsh(self.A).abs()[[0, -1]]
+            #     * torch.linalg.eigvalsh(self.B).abs()[[0, -1]]
+            # )
+            # but torch.linalg.eigvalsh is O(n^3).
+            # Lanczos iteration, even naive python implementation, is faster for larger
+            # matrices (~ n > 256), although eigvalsh very optizized.
+            damping = self._find_target_cond_damping(target_cond)
         damping_A = damping_B = damping
         if self.has_A and self.has_B:
             A_eig_mean = (self.A.trace() if self.A_is_square else torch.sum(self.A ** 2)) / self.A_dim
@@ -546,6 +567,149 @@ class Kron:
                 vec_bias.copy_(mvp_b)
             return mvp_w, mvp_b
         return mvp_w
+
+    def _find_target_cond_damping(
+        self,
+        target_cond: float,
+        max_iters=100,
+        eigv_tol=1e-4,
+        eigvalsh_faster: int = 256,
+    ) -> torch.Tensor:
+        assert isinstance(self.A, torch.Tensor)
+        assert isinstance(self.B, torch.Tensor)
+
+        device = self.A.device
+        dtype = self.A.dtype
+
+        def extremal_eigenvalues_fast_cases(
+            matrix,
+        ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+            assert isinstance(matrix, torch.Tensor)
+            if matrix.shape[-1] <= eigvalsh_faster:
+                # "small" matrix so O(n^3) eigendecomp is faster (optimized, compiled)
+                # Eigvalsh in ascending order, so first is smallest and last largest.
+                # Near zero eigval might be negative due to numerics, so abs() again but
+                # ignore possibly wrong order now.
+                eigvalsh = torch.linalg.eigvalsh(matrix).abs()
+                return eigvalsh[0], eigvalsh[-1]
+            # Use Gershgorin circle theorem for eigenvalues discs
+            diag = matrix.diagonal()
+            radius = matrix.abs().sum(-1) - diag.abs()
+            eigval_lower_bound = (diag - radius).min()
+            # eigval_upper_bound = (diag + radius).max()
+            if eigval_lower_bound <= 0:
+                # matrix could be singular, so check if cholesky fails -> min eigv is 0
+                non_psd = torch.linalg.cholesky_ex(matrix, check_errors=False).info != 0
+                if non_psd:
+                    return torch.zeros(size=(), device=device, dtype=dtype), None
+            return None, None
+
+        def target_cond_damping(
+            target_cond, A_min_eigval, A_max_eigval, B_min_eigval, B_max_eigval
+        ):
+            # compute damping to reach target_cond
+            max_eigval = A_max_eigval * B_max_eigval
+            min_eigval = A_min_eigval * B_min_eigval
+
+            if max_eigval / target_cond < min_eigval:
+                # condition number already smaller than target
+                return torch.zeros_like(max_eigval)
+            else:
+                # (max_eigval - min_eigval * target_cond) and (target_cond - 1)
+                # are positive.
+                return (max_eigval - min_eigval * target_cond) / (target_cond - 1)
+
+        def naive_lanczos(matrix, determine_min, determine_max, ritz_every=8):
+            # naive Lanczos tridiag (Golub, van Loan MC 4th 10.1.1)
+            # subscript i in array[i]
+            n = matrix.size()[0]
+            max_k = min(max_iters, n)
+            alpha = torch.empty(size=(max_k + 1,), device=device, dtype=dtype)
+            beta = torch.zeros(size=(max_k + 1,), device=device, dtype=dtype)
+            q = torch.empty(size=(max_k + 1, n), device=device, dtype=dtype)
+            r = torch.empty(size=(max_k + 1, n), device=device, dtype=dtype)
+            q[0] = torch.zeros_like(matrix[0])
+            q[1] = torch.randn_like(matrix[0])
+            q[1] /= torch.linalg.norm(q[1])
+            r[0] = q[1]
+            eigv_largest = eigv_smallest = None
+            for k in range(1, max_k + 1):
+                Mq_k = matrix @ q[k]
+                alpha[k] = q[k].dot(Mq_k)
+                r[k] = Mq_k - alpha[k] * q[k] - beta[k - 1] * q[k - 1]
+                beta[k] = torch.linalg.norm(r[k])
+                if beta[k] < 1e-7 and k < n:
+                    # Krylov subspace only rank k but q was random, so almost certain
+                    # nonzero component of all basisvectors of A. -> A has rank k < n
+                    eigv_smallest = torch.zeros(size=(), device=device, dtype=dtype)
+                    determine_min = False
+                if k < max_k:
+                    q[k + 1] = r[k] / beta[k]
+                if k % ritz_every == 0 or k == max_k:
+                    # TODO: ideally we would have a fast (compiled) bisection algo based
+                    # on Sturm Sequence Sign changes and the tridiagonal determinant
+                    # continuant recursion to find the extremal Ritz values; and a
+                    # tridiagonal matrix solver to find the Ritz vector.
+                    # T_k should be small, so eigh should be reasonably fast
+                    T_k = torch.zeros(size=(k, k), device=device, dtype=dtype)
+                    T_k.diagonal().copy_(alpha[1 : k + 1])
+                    T_k.diagonal(offset=-1).copy_(beta[1:k])
+                    T_k.diagonal(offset=1).copy_(beta[1:k])
+                    ritzvals, rizvecs = torch.linalg.eigh(T_k)
+                    # check error bound of Ritz values
+                    # see 10.1.4 Golub, van Loan MC 4th or bound 4.2 of "On Estimating
+                    # the Largest Eigenvalue With the Lanczos Algorithm", Parlett et al.
+                    if determine_min:
+                        ritz_smallest = ritzvals[0]
+                        bound_smallest = (beta[k] * rizvecs[0, k - 1]).abs()
+                        tol_smallest = bound_smallest / ritz_smallest
+                        eigv_smallest = ritz_smallest
+                        determine_min = tol_smallest > eigv_tol
+                    if determine_max:
+                        ritz_largest = ritzvals[-1]
+                        bound_largest = (beta[k] * rizvecs[k - 1, k - 1]).abs()
+                        tol_largest = bound_largest / ritz_largest
+                        eigv_largest = ritz_largest
+                        determine_max = tol_largest > eigv_tol
+                    # if not (determine_max or determine_min):
+                    #     break
+            return eigv_smallest, eigv_largest
+
+        # TODO: smaller first
+        # TODO: if one singular dont check singular other
+        # TODO: if one condition too large, only get max eigv of other
+        A_min_eigval, A_max_eigval = extremal_eigenvalues_fast_cases(self.A)
+        B_min_eigval, B_max_eigval = extremal_eigenvalues_fast_cases(self.B)
+        if A_min_eigval == 0 or B_min_eigval == 0:
+            # Kronecker (self) is singular
+            # only need to determine max eigvalues
+            # set both to zero
+            A_min_eigval = B_min_eigval = torch.zeros(
+                size=(), device=device, dtype=dtype
+            )
+
+        # determine missing values
+        if (A_min_eigval is None) or (A_max_eigval is None):
+            A_min_ritzval, A_max_ritzval = naive_lanczos(
+                self.A,
+                determine_min=A_min_eigval is None,
+                determine_max=A_max_eigval is None,
+            )
+            A_min_eigval = A_min_ritzval if A_min_eigval is None else A_min_eigval
+            A_max_eigval = A_max_ritzval if A_max_eigval is None else A_max_eigval
+
+        if (B_min_eigval is None) or (B_max_eigval is None):
+            B_min_ritzval, B_max_ritzval = naive_lanczos(
+                self.B,
+                determine_min=B_min_eigval is None,
+                determine_max=B_max_eigval is None,
+            )
+            B_min_eigval = B_min_ritzval if B_min_eigval is None else B_min_eigval
+            B_max_eigval = B_max_ritzval if B_max_eigval is None else B_max_eigval
+
+        return target_cond_damping(
+            target_cond, A_min_eigval, A_max_eigval, B_min_eigval, B_max_eigval
+        )
 
 
 class KFE:
@@ -688,6 +852,33 @@ class UnitWise:
         if not self.has_data:
             raise ValueError('data do not exist.')
         data = self.data
+        if damping < -1:
+            # consider damping as target maximum condition number
+            target_cond = -damping
+            assert data.ndim == 3
+            # Eigvalsh are in ascending order, so first is smallest and last largest.
+            # Near zero eigval might be negative due to numerics, so abs() again but
+            # ignore possibly wrong order now.
+            eigv_smallest, eigv_largest = torch.linalg.eigvalsh(data).abs().T[[0, -1]]
+            # If ratio not already larger than target_cond, then find damping for which
+            # (eigv_largest + d) / (eigv_smallest + d) = target_cond.
+            # (eigv_largest - eigv_smallest * target_cond) and (target_cond - 1) are
+            # positive.
+            damping = torch.where(
+                eigv_largest / target_cond < eigv_smallest,
+                torch.zeros_like(eigv_largest),
+                (eigv_largest - eigv_smallest * target_cond) / (target_cond - 1),
+            )
+            # Special case eigv_largest = eigv_smallest = 0, i.e. data = 0 are dead
+            # neurons or layer that does not affect predictive distribution, so set
+            # damping=1 to effectively disable preconditioning for these gradients.
+            damping = torch.where(
+                eigv_largest == 0,
+                torch.ones_like(eigv_largest),
+                damping
+            )
+            # for broadcasting in adding to diagonal
+            damping.unsqueeze_(-1)
         if not torch.all(data == 0):
             diag = torch.diagonal(data, dim1=1, dim2=2)
             diag += damping
@@ -835,6 +1026,8 @@ class Diag:
         return pointer
 
     def update_inv(self, damping=_default_damping, replace=False):
+        if damping < 0:
+            raise NotImplementedError()
         if self.has_weight:
             if not torch.all(self.weight == 0):
                 self.weight_inv = 1 / (self.weight + damping)
