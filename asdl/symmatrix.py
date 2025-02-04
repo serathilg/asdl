@@ -590,8 +590,12 @@ class Kron:
                 # Eigvalsh in ascending order, so first is smallest and last largest.
                 # Near zero eigval might be negative due to numerics, so abs() again but
                 # ignore possibly wrong order now.
-                eigvalsh = torch.linalg.eigvalsh(matrix).abs()
-                return eigvalsh[0], eigvalsh[-1]
+                try:
+                    eigvalsh = torch.linalg.eigvalsh(matrix).abs()
+                    return eigvalsh[0], eigvalsh[-1]
+                except torch._C._LinAlgError:
+                    # probably singular, check with cholesky below
+                    pass
             # Use Gershgorin circle theorem for eigenvalues discs
             diag = matrix.diagonal()
             radius = matrix.abs().sum(-1) - diag.abs()
@@ -671,8 +675,8 @@ class Kron:
                         tol_largest = bound_largest / ritz_largest
                         eigv_largest = ritz_largest
                         determine_max = tol_largest > eigv_tol
-                    # if not (determine_max or determine_min):
-                    #     break
+                    if not (determine_max or determine_min):
+                        break
             return eigv_smallest, eigv_largest
 
         # TODO: smaller first
