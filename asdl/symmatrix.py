@@ -592,7 +592,8 @@ class Kron:
                 # ignore possibly wrong order now.
                 try:
                     eigvalsh = torch.linalg.eigvalsh(matrix).abs()
-                    return eigvalsh[0], eigvalsh[-1]
+                    if eigvalsh[0].isfinite() and eigvalsh[-1].isfinite():
+                        return eigvalsh[0], eigvalsh[-1]
                 except torch._C._LinAlgError:
                     # probably singular, check with cholesky below
                     pass
