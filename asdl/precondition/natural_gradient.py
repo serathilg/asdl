@@ -654,6 +654,11 @@ class NaturalGradientMaker(PreconditionedGradientMaker):
             if shape == SHAPE_KFE:
                 kwargs['eps'] = self.config.damping
             matrix.mvp(**kwargs)
+        else:
+            raise ValueError(
+                f"Inverse preconditioner for module {module} has not been calculated "
+                f"but attempted to use_inv={use_inv}."
+            )
 
     def is_module_for_inv_and_precondition(self, module: nn.Module):
         if module not in self.modules_for_curvature:

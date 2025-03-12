@@ -150,6 +150,10 @@ class SymMatrix:
         return self.data is not None
 
     @property
+    def has_inv(self):
+        return self.inv is not None
+
+    @property
     def has_kron(self):
         return self.kron is not None
 
@@ -302,6 +306,7 @@ class SymMatrix:
 
     def update_inv(self, damping=_default_damping, replace=False):
         if self.has_data and not torch.all(self.data == 0):
+            damping = psd_damping(self.data, damping)
             self.inv = cholesky_inv(self.data, damping)
             if replace:
                 del self.data
