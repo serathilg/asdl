@@ -1030,7 +1030,7 @@ class EkfacGradientMaker(NaturalGradientMaker):
     def _update_preconditioner(self, *args, **kwargs):
         pass
 
-    def _precondition(self, vectors: ParamVector = None, grad_scale=None, use_inv=False):
+    def precondition(self, vectors: ParamVector = None, grad_scale=None, use_inv=False):
         if use_inv:
             raise ValueError('EKFAC does not calculate the inverse matrix.')
         super().precondition(vectors=vectors, grad_scale=grad_scale, use_inv=False)

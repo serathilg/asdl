@@ -26,7 +26,7 @@ class CurveBallGradientMaker(PreconditionedGradientMaker):
     def do_forward_and_backward(self, step=None) -> bool:
         return False
 
-    def _precondition(self):
+    def precondition(self):
         config = self.config
         hvps = self.loss_hvp(tangents=self._momentum)
         grads = [p.grad for p in self._params]
