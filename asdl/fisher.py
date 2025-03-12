@@ -539,14 +539,14 @@ class FisherExactMVN(FisherMaker):
             # d_T of shape [batch..., dim, 1], so d[...,i] are d_T.squeeze(-1)[...,i]
             closure(lambda: d_T.squeeze(-1)[..., i].sum(), retain_graph=True)
 
-        # Backwards for Jacobian_vec(cov)^T cholesky(Fisher_vec(cov)) product.
-        # Semantically, we want to backward i'th column of (L kron L) inverse at
-        # vectorized covariance output. Instead solve vec(cov) = (L kron L)^T d^T
+        # Backwards for Jacobian^T_vec(cov) cholesky(Fisher_vec(cov)) product.
+        # Semantically, we want to backward i'th column of (sqrt(2) L kron L) inverse at
+        # vectorized covariance. Instead solve vec(cov) = (L kron L)^T d^T sqrt(2)
         d_T = torch.linalg.solve_triangular(
             kron(L, L).mT,
             mvn.covariance_matrix.flatten(-2, -1).unsqueeze(-1),
             upper=True,
-        )
+        ) / (2**0.5)
         for i in range(dim**2):
             # d_T of shape [batch..., dim**2, 1], so d[...,i] are d_T.squeeze(-1)[...,i]
             closure(lambda: d_T.squeeze(-1)[..., i].sum(), retain_graph=i < dim**2 - 1)
