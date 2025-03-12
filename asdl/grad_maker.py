@@ -162,6 +162,7 @@ class GradientMaker:
         self._dummy_loss: DummyObject = None
         self._dummy_logits = DummyObject([GetFirstItem()])
         self._batch_size: int = _invalid_data_size
+        self._cached_id_and_stateless_model_fn: dict[int,nn.Module | None] = {}
 
     def setup_model_call(
         self, batch_size: int, model_fn: Callable, *args, **kwargs
@@ -378,10 +379,27 @@ class GradientMaker:
 
     def _get_stateless_model_fn(self):
         if self._model_fn is None:
-            raise ValueError('model_fn is not set. Call setup_model_call().')
+            raise ValueError("model_fn is not set. Call setup_model_call().")
         if not isinstance(self._model_fn, nn.Module):
-            raise TypeError('model_fn has to be an object of torch.nn.Module.')
-        model_fn, params, buffers = _make_functional_with_buffers(self._model_fn)
+            raise TypeError("model_fn has to be an object of torch.nn.Module.")
+        # creating a stateless version of the model is not cheap, so store it.
+        # self._model_fn could change with new .setup_model_call() however, so validate
+        cached_stateless_model_fn = self._cached_id_and_stateless_model_fn.get(
+            id(self._model_fn)
+        )
+        if cached_stateless_model_fn is None:
+            # never cached this model
+            # TODO: is there some way to avoid the real tensor copy in the deepcopy
+            # TODO: when we'll just move it to "meta" anyways?
+            # TODO: Maybe store(.state_dict) and then load(map_location="meta")?
+            cached_stateless_model_fn: nn.Module = copy.deepcopy(self._model_fn)
+            cached_stateless_model_fn.to("meta")
+            self._cached_id_and_stateless_model_fn[id(self._model_fn)] = (
+                cached_stateless_model_fn
+            )
+        model_fn, params, buffers = _functional_with_buffers(
+            self._model_fn, cached_stateless_model_fn
+        )
         return model_fn, params, buffers
 
     def _get_stateless_model_fn_params_only(self):
@@ -607,9 +625,9 @@ class GradientMaker:
             return nvp
 
 
-def _make_functional_with_buffers(mod, disable_autograd_tracking=False):
-    # TODO: investigate usage, instead of blindly replacing make_functional_with_buffers
-    # https://gist.github.com/zou3519/7769506acc899d83ef1464e28f22e6cf
+def _functional_with_buffers(mod, stateless_mod, disable_autograd_tracking=False):
+    # Based on https://gist.github.com/zou3519/7769506acc899d83ef1464e28f22e6cf
+    # But takes stateless_mod to avoid repeated copies and just updates params/buffers
     params_dict = dict(mod.named_parameters())
     params_names = params_dict.keys()
     params_values = tuple(params_dict.values())
@@ -617,9 +635,6 @@ def _make_functional_with_buffers(mod, disable_autograd_tracking=False):
     buffers_dict = dict(mod.named_buffers())
     buffers_names = buffers_dict.keys()
     buffers_values = tuple(buffers_dict.values())
-
-    stateless_mod = copy.deepcopy(mod)
-    stateless_mod.to("meta")
 
     def fmodel(new_params_values, new_buffers_values, *args, **kwargs):
         new_params_dict = {
