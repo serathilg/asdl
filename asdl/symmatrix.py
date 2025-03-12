@@ -1156,7 +1156,13 @@ class Diag:
 
     def update_inv(self, damping=_default_damping, replace=False):
         if damping < 0:
-            raise NotImplementedError()
+            # diagonal treats every parameter independently, so every system has
+            # condition number of 1 by definition. Does not make sense to dampen.
+            # Additionally, smallest diagonal value overestimates smallest eigenvalue,
+            # diag_i = e_i^T A e_i >= min_v v^T A v = lambda_N, so diag approximation
+            # of this layer is effectively damped already in some way.
+            # Only need to look out for division by zero here (just like Adam does).
+            damping = 1e-7
         if self.has_weight:
             if not torch.all(self.weight == 0):
                 self.weight_inv = 1 / (self.weight + damping)
