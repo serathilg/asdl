@@ -74,6 +74,17 @@ class ParamVector:
         for key in self.vectors:
             self.vectors[key].mul_(value)
         return self
+    
+    def div_(self, value):
+        for key in self.vectors:
+            self.vectors[key].div_(value)
+        return self
+    
+    def copy_(self, other):
+        assert self._check_same_param_order(other)
+        for key in self.vectors:
+            self.vectors[key].copy_(other.vectors[key])
+        return self
 
     def dot(self, other, concat_first: bool = True):
         assert self._check_same_param_order(other)

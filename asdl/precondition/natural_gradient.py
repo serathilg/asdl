@@ -141,8 +141,8 @@ class NaturalGradientMaker(PreconditionedGradientMaker):
         self.grads = []
         self.packed_grads = []
 
-        self._ema_vec_weights = defaultdict(lambda: None)
-        self._ema_vec_biases = defaultdict(lambda: None)
+        self._ema_vec_weights: dict[int, torch.Tensor] = {}
+        self._ema_vec_biases: dict[int, torch.Tensor] = {}
         self.raw_gradients: dict[torch.Tensor, torch.Tensor] = {}
 
     def get_fisher_from_model(self):
@@ -404,8 +404,26 @@ class NaturalGradientMaker(PreconditionedGradientMaker):
 
         ema_decay = config.ema_decay
         if ema_decay != _invalid_ema_decay:
-            scale *= ema_decay
-            self._scale_fisher(1 - ema_decay)
+            # Exponential moving average on the Fisher estimate by scaling the current
+            # down and setting a reduced scale for the addition of the new estimate.
+            # Adam-style bias correction, Fisher starts at zero and first estimate will
+            # be scaled by ema_decay, so ema_decay times too small after first.
+            # Generally, scale by 1 / (1 - beta^steps) for beta = 1 - ema_decay.
+            beta = 1 - ema_decay
+            # We could do the scaling at usage, but also can just sore the scaled
+            # version and undo the last to correct for this one.
+            # [beta * (1 - beta^last_step) / (1 - beta^step)] * last_fisher + 
+            #   [(1 - beta) / (1 - beta^step)] * new_estimate
+            # beta * (1 - beta^last_step) / (1 - beta^step)
+            #   = (beta - beta^step) / (1 - beta^step) 
+            #   = (beta - 1) / (1 - beta^step) + 1
+            #   = 1 - ema_decay / (1 - beta^step)
+            # (1 - beta) / (1 - beta^step) = ema_decay / (1 - beta^step)
+            # exponents start at 1 but state["curvature_ema_step"] starts at 0
+            ema_history_length = self.state["curvature_ema_step"] + 1
+            correction_divisor = 1 - beta**ema_history_length
+            scale *= ema_decay / correction_divisor
+            self._scale_fisher(1 - ema_decay / correction_divisor)
 
         self.delegate_forward_and_backward(fisher_maker,
                                            scale=scale,
@@ -417,6 +435,9 @@ class NaturalGradientMaker(PreconditionedGradientMaker):
 
         if self.do_accumulate and self.world_size > 1:         
             self.reduce_scatter_curvature()
+
+        if ema_decay != _invalid_ema_decay:
+            self.state["curvature_ema_step"] += 1
 
     def update_preconditioner(self, damping=None, module_name=None, kron=None, zero_curvature=False, partition_aware=False):
         if not self.do_accumulate:
@@ -480,24 +501,65 @@ class NaturalGradientMaker(PreconditionedGradientMaker):
     def precondition(self, vectors: ParamVector = None, grad_scale=None, use_inv=True):
         if grad_scale is None:
             grad_scale = self.grad_scale
+
+        if self.config.raw_gradient_ema != _invalid_ema_decay:
+            # Apply EMA to raw gradient with Adam-style bias correction
+            # Convert decay factor to EMA multiplier beta
+            beta = 1 - self.config.raw_gradient_ema
+            # exponents start at 1 but state["grad_ema_step"] starts at 0
+            ema_history_length = self.state["grad_ema_step"] + 1
+            ema_correction_divisor = 1 - beta**ema_history_length
+        else:
+            ema_correction_divisor = 1.0
+
         for enum_shape, shape in enumerate(_module_level_shapes):
             for enum_module, module in enumerate(self.modules_for(shape)):
                 if self.world_rank == self.partitions[enum_shape][enum_module]:
                     if not self.is_module_for_inv_and_precondition(module):
                         continue
-                    self._precondition_module(module, shape, vectors, grad_scale=grad_scale, use_inv=use_inv)
+                    self._precondition_module(
+                        module,
+                        shape,
+                        vectors,
+                        grad_scale=grad_scale,
+                        use_inv=use_inv,
+                        ema_correction_divisor=ema_correction_divisor,
+                    )
 
         params = [p for p in self.parameters_for(SHAPE_FULL)]
         if len(params) > 0:
             fisher = self._get_full_fisher()
             if fisher is None:
-                raise ValueError(f'Fisher of shape {SHAPE_FULL} has not been calculated.')
+                raise ValueError(
+                    f"Fisher of shape {SHAPE_FULL} has not been calculated."
+                )
             if vectors is None:
                 vectors = ParamVector(params, [p.grad for p in params])
             if vectors is None:
-                raise ValueError('gradient has not been calculated.')
+                raise ValueError("gradient has not been calculated.")
+            if self.config.store_raw_gradient:
+                # TODO: inplace copy if tensor already exists?
+                for p in params:
+                    self.raw_gradients[p] = p.grad.clone()
             if grad_scale != 1:
                 vectors.mul_(grad_scale)
+            if self.config.raw_gradient_ema != _invalid_ema_decay:
+                # get old gradient ema (or initialize to zero)
+                emas = []
+                for p in params:
+                    ema = self._ema_vec_weights.get(id(p))
+                    if ema is None:
+                        self._ema_vec_weights[id(p)] = ema = torch.zeros_like(p.grad)
+                    emas.append(ema)
+                vectors_ema = ParamVector(params, emas)
+                # inplace compute of new ema
+                vectors.mul_(self.config.raw_gradient_ema).add_(
+                    vectors_ema.mul_(1 - self.config.raw_gradient_ema)
+                )
+                # store updated ema
+                vectors_ema.copy_(vectors)
+                # inplace bias correction
+                vectors.div_(ema_correction_divisor)
             fisher.mvp(vectors=vectors, use_inv=use_inv, inplace=True)
 
         # all_reduce all the grads after preconditioning them. (Basic DDP. Will be changed when DP & MP)
@@ -507,75 +569,88 @@ class NaturalGradientMaker(PreconditionedGradientMaker):
             else:
                 self.all_reduce_all_grad(async_op=False)
 
-    def _precondition_module(self, module, shape=None, vectors: ParamVector = None,
-                            vec_weight: torch.Tensor = None, vec_bias: torch.Tensor = None,
-                            grad_scale=None, use_inv=True):
+        self.state["grad_ema_step"] += 1
+
+    def _precondition_module(
+        self,
+        module,
+        shape=None,
+        vectors: ParamVector = None,
+        vec_weight: torch.Tensor = None,
+        vec_bias: torch.Tensor = None,
+        grad_scale=None,
+        use_inv=True,
+        ema_correction_divisor=1.0,
+    ):
         if grad_scale is None:
             grad_scale = self.grad_scale
         if shape is None:
-            for s in _module_level_shapes:
-                if module in self.modules_for(s):
-                    shape = s
-                    break
+            shape = self.shape_for.get(module)
         if vectors is not None:
             vec_weight = vectors.get_vector_by_param(module.weight, None)
             vec_bias = vectors.get_vector_by_param(module.bias, None)
         if shape is None:
-            raise ValueError(f'No shape is assigned to module: {module}.')
+            raise ValueError(f"No shape is assigned to module: {module}.")
         matrix = self._get_module_symmatrix(module, shape)
         if matrix is None:
-            raise ValueError(f'Matrix of shape {shape} for module {module} has not been calculated.')
+            raise ValueError(
+                f"Matrix of shape {shape} for module {module} has not been calculated."
+            )
         if vec_weight is None and module.weight.requires_grad:
             vec_weight = module.weight.grad
         if vec_weight is None:
-            raise ValueError(f'weight gradient for module {module} has not been calculated.')
+            raise ValueError(
+                f"weight gradient for module {module} has not been calculated."
+            )
         if _bias_requires_grad(module):
             if vec_bias is None:
                 vec_bias = module.bias.grad
             if vec_bias is None:
-                raise ValueError(f'bias gradient for module {module} has not been calculated.')
+                raise ValueError(
+                    f"bias gradient for module {module} has not been calculated."
+                )
+        if self.config.store_raw_gradient:
+            # TODO: inplace copy if tensor already exists?
+            self.raw_gradients[module.weight] = vec_weight.clone()
+            if _bias_requires_grad(module):
+                self.raw_gradients[module.bias] = vec_bias.clone()
         if grad_scale != 1:
             vec_weight.data.mul_(grad_scale)
             if vec_bias is not None:
                 vec_bias.data.mul_(grad_scale)
-        if self.config.store_raw_gradient:
-            self.raw_gradients[module.weight] = vec_weight.clone()
-            if _bias_requires_grad(module):
-                self.raw_gradients[module.bias] = vec_bias.clone()
         if self.config.raw_gradient_ema != _invalid_ema_decay:
-            has_bias = vec_bias is not None
-            # get old gradient ema
-            prev_weight_grad = self._ema_vec_weights[module]
-            # if first gradient, initalize ema with zero vectors
-            if prev_weight_grad is None:
-                prev_weight_grad = torch.zeros_like(vec_weight)
-                self._ema_vec_weights[module] = prev_weight_grad
-            # same for bias (if it exists)
-            if has_bias:
-                prev_bias_grad = self._ema_vec_biases[module]
-            if has_bias and prev_bias_grad is None:
-                prev_bias_grad = torch.zeros_like(vec_bias)
-                self._ema_vec_biases[module] = prev_bias_grad
-            # ema with the zero initialization bias correction of Adam, so convert decay
-            # to beta
-            beta = 1 - self.config.raw_gradient_ema
+            # get old gradient ema (or initialize to zero)
+            weight_grad_ema = self._ema_vec_weights.get(id(module))
+            if weight_grad_ema is None:
+                self._ema_vec_weights[id(module)] = weight_grad_ema = torch.zeros_like(
+                    vec_weight
+                )
             # inplace compute of new ema
-            vec_weight.mul_(1 - beta).add_(prev_weight_grad.mul(beta))
-            if has_bias:
-                vec_bias.mul_(1 - beta).add_(prev_bias_grad.mul(beta))
+            vec_weight.mul_(self.config.raw_gradient_ema).add_(
+                weight_grad_ema.mul_(1 - self.config.raw_gradient_ema)
+            )
             # store updated ema
-            prev_weight_grad.copy_(vec_weight)
-            if has_bias:
-                prev_bias_grad.copy_(vec_bias)
-            # inplace compute of bias correction
-            # first exponent is 1 but self.tate starts at 0
-            ema_history_length = self.state["step"] + 1
-            correction_factor = 1 / (1 - beta**ema_history_length)
-            vec_weight.mul_(correction_factor)
-            if has_bias:
-                vec_bias.mul_(correction_factor)
+            weight_grad_ema.copy_(vec_weight)
+            # inplace bias correction
+            vec_weight.div_(ema_correction_divisor)
+
+            # same for bias (if it exists)
+            if vec_bias is not None:
+                bias_grad_ema = self._ema_vec_biases.get(id(module))
+                if bias_grad_ema is None:
+                    self._ema_vec_biases[id(module)] = bias_grad_ema = torch.zeros_like(
+                        vec_bias
+                    )
+                vec_bias.mul_(self.config.raw_gradient_ema).add_(
+                    bias_grad_ema.mul_(1 - self.config.raw_gradient_ema)
+                )
+                bias_grad_ema.copy_(vec_bias)
+                vec_bias.div_(ema_correction_divisor)
+
         if not use_inv or matrix.has_inv:
-            kwargs = dict(vec_weight=vec_weight, vec_bias=vec_bias, use_inv=use_inv, inplace=True)
+            kwargs = dict(
+                vec_weight=vec_weight, vec_bias=vec_bias, use_inv=use_inv, inplace=True
+            )
             if shape == SHAPE_KFE:
                 kwargs['eps'] = self.config.damping
             matrix.mvp(**kwargs)

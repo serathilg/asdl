@@ -103,7 +103,7 @@ class PreconditionedGradientMaker(GradientMaker):
                 self.curvature_upd_schedule = get_update_schedule(num_total_steps=config.num_total_steps,
                                                                   update_ratio=config.curvature_upd_ratio,
                                                                   warmup_ratio=config.curvature_warmup_ratio)
-        self.state = dict(step=0)
+        self.state = dict(step=0, curvature_ema_step=0, grad_ema_step=0)
         self.module_dict = nn.ModuleDict({name.replace('.', '/'): m for name, m in model.named_modules()
                                           if self._is_supported(name, m)})
         self.device = next(self.module_dict.parameters()).device
@@ -135,6 +135,8 @@ class PreconditionedGradientMaker(GradientMaker):
 
     def load_state_dict(self, state_dict: dict):
         self.state['step'] = state_dict['step']
+        self.state['curvature_ema_step'] = state_dict['curvature_ema_step']
+        self.state['grad_ema_step'] = state_dict['grad_ema_step']
 
     def forward_and_backward(self):
         step = self.state['step']
