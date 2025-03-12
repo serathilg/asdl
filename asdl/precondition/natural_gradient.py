@@ -652,7 +652,10 @@ class NaturalGradientMaker(PreconditionedGradientMaker):
                 vec_weight=vec_weight, vec_bias=vec_bias, use_inv=use_inv, inplace=True
             )
             if shape == SHAPE_KFE:
-                kwargs['eps'] = self.config.damping
+                # TODO: condition number damping for KFE
+                if self.config.damping < -1:
+                    raise NotImplementedError()
+                kwargs["eps"] = self.config.damping
             matrix.mvp(**kwargs)
         else:
             raise ValueError(

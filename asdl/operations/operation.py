@@ -243,7 +243,12 @@ class Operation:
                 if op_name == OP_COV:
                     self.accumulate_result(cov, OP_COV, 'data')
                 else:
-                    self.accumulate_result(cholesky_inv(cov, damping), OP_COV, 'inv')
+                    # TODO condition
+                    if damping < -1:
+                        raise NotImplementedError(
+                            "Condition damping for inverse layer-wise not yet supported."
+                        )
+                    self.accumulate_result(cholesky_inv(cov, damping), OP_COV, "inv")
             elif op_name == OP_CVP:
                 _, _, batch_g = self.collect_batch_grads(in_data, out_grads)
                 if vector is None:
@@ -269,7 +274,12 @@ class Operation:
                 del in_data
                 B = self.cov_kron_B(module, out_grads).mul_(cov_scale)
 
-                damping_A, damping_B = self.cov_kron_damping(A, B)
+                # TODO condition
+                if damping < -1:
+                    raise NotImplementedError(
+                        "Condition damping for inverse Kron not yet supported."
+                    )
+                damping_A, damping_B = self.cov_kron_damping(A, B, damping=damping)
                 A_inv = cholesky_inv(A, damping_A)
                 del A
                 B_inv = cholesky_inv(B, damping_B)
@@ -283,7 +293,12 @@ class Operation:
                 A = self.cov_swift_kron_A(module, in_data)
                 del in_data
                 B = self.cov_swift_kron_B(module, out_grads)
-                damping_A, damping_B = self.cov_kron_damping(A, B)
+                # TODO condition
+                if damping < -1:
+                    raise NotImplementedError(
+                        "Condition damping for inverse swift Kron not yet supported."
+                    )
+                damping_A, damping_B = self.cov_kron_damping(A, B, damping=damping)
 
                 if A.shape[0] == A.shape[1]:
                     A_inv = cholesky_inv(A.mul_(cov_scale), damping_A)
@@ -315,6 +330,11 @@ class Operation:
                 if op_name == OP_COV_UNIT_WISE:
                     self.accumulate_result(cov, OP_COV_UNIT_WISE, 'data')
                 else:
+                    # TODO condition
+                    if damping < -1:
+                        raise NotImplementedError(
+                            "Condition damping for inverse unit-wise not yet supported."
+                        )
                     diag = torch.diagonal(cov, dim1=1, dim2=2)
                     diag += damping
                     inv = torch.inverse(cov)
@@ -325,12 +345,22 @@ class Operation:
                     if op_name == OP_COV_DIAG:
                         self.accumulate_result(cov, OP_COV_DIAG, 'weight')
                     else:
+                        # TODO condition
+                        if damping < -1:
+                            raise NotImplementedError(
+                                "Condition damping for inverse diag not yet supported."
+                            )
                         self.accumulate_result(1/(cov+damping), OP_COV_DIAG, 'weight_inv')
                 if original_requires_grad(module, 'bias'):
                     cov = self.cov_diag_bias(module, out_grads).mul_(cov_scale)
                     if op_name == OP_COV_DIAG:
                         self.accumulate_result(cov, OP_COV_DIAG, 'bias')
                     else:
+                        # TODO condition
+                        if damping < -1:
+                            raise NotImplementedError(
+                                "Condition damping for inverse diag not yet supported."
+                            )
                         self.accumulate_result(1/(cov+damping), OP_COV_DIAG, 'bias_inv')
             elif op_name == OP_GRAM_HADAMARD:
                 if self._model_for_kernel is None:
@@ -454,8 +484,12 @@ class Operation:
     def cov_swift_kron_B(module, out_grads):
         raise NotImplementedError
 
-    def cov_kron_damping(self, A, B, eps=1.e-7):
-        damping_A = damping_B = damping = self._damping
+    @staticmethod
+    def cov_kron_damping(A, B, damping, eps=1.e-7):
+        # TODO: condition number
+        if damping < -1:
+            raise NotImplementedError("Condition damping not yet supported.")
+        damping_A = damping_B = damping
         A_eig_mean = (A.trace() if A.shape[0] == A.shape[1] else (A ** 2).sum()) / A.shape[-1]
         B_eig_mean = (B.trace() if B.shape[0] == B.shape[1] else (B ** 2).sum()) / B.shape[-1]
         pi = torch.sqrt(A_eig_mean / B_eig_mean)
@@ -695,6 +729,11 @@ class OperationContext:
             return
         cov = torch.matmul(bg.T, bg).mul_(scale)  # p x p
         if calc_inv:
+            # TODO: negative cond damping
+            if damping < -1:
+                raise NotImplementedError(
+                    "Condition damping for inverse full not yet supported."
+                )
             self.accumulate_result(module, cholesky_inv(cov, damping), OP_FULL_COV, 'inv')
         else:
             self.accumulate_result(module, cov, OP_FULL_COV, 'data')
