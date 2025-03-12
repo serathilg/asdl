@@ -21,7 +21,10 @@ class LayerNorm(Operation):
     @staticmethod
     def preprocess_in_data(module, in_data, out_data):
         # restore normalized input
-        in_data_norm = (out_data - module.bias).div(module.weight)
+        if module.bias is None:
+            in_data_norm = out_data.div(module.weight)
+        else:
+            in_data_norm = (out_data - module.bias).div(module.weight)
         in_data = in_data_norm
         # n x * x norm_shape -> n x norm_shape
         norm_shape_len = len(module.weight.shape)
@@ -74,8 +77,11 @@ class LayerNorm(Operation):
         cov_ww = (grads_w ** 2).sum(0).flatten()  # n_features x 1
         cov_bb = (grads_b ** 2).sum(0).flatten()  # n_features x 1
         cov_wb = (grads_w * grads_b).sum(0).flatten()  # n_features x 1
-        blocks = torch.vstack([cov_ww, cov_wb, cov_wb, cov_bb]).reshape(2, 2, n_features).transpose(0, 2)
-        return blocks  # n_features x 2 x 2
+        if module.bias is None:
+            blocks = cov_ww.reshape(n_features, 1, 1)
+        else:
+            blocks = torch.stack([cov_ww, cov_wb, cov_wb, cov_bb], dim=1).reshape(n_features, 2, 2)
+        return blocks  # n_features x 2 x 2 or n_features x 1 x 1
 
     @staticmethod
     def cov_kron_A(module, in_data):

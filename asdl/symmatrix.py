@@ -1023,25 +1023,58 @@ class UnitWise:
                 self.data = None
 
     def mvp(self, vec_weight, vec_bias, use_inv=False, inplace=False):
-        mat = self.inv if use_inv else self.data  # (f, 2, 2) or (f_out, f_in+1, f_in+1)
-        if vec_weight.shape == vec_bias.shape and mat.ndim == 3 and mat.shape[-1] == mat.shape[-2]:
-            # for BatchNormNd and LayerNorm
-            v = torch.stack([vec_weight, vec_bias], dim=1)  # (f, 2)
-            v = v.unsqueeze(2)  # (f, 2, 1)
-            mvp_wb = torch.matmul(mat, v).squeeze(2)  # (f, 2)
-            mvp_w = mvp_wb[:, 0]
-            mvp_b = mvp_wb[:, 1]
+        mat = self.inv if use_inv else self.data
+        # BatchNormNd and LayerNorm: vec_weight (f,), vec_bias (f,) or None
+        # mat: (f, 2, 2) or (f, 1, 1) for bias=False
+        # Linear/Conv2d: vec_weight (f_out, f_in), vec_bias (f_out,) or None
+        # mat: (f_out, f_in+1, f_in+1) or (f_out, f_in, f_in) for bias=False
+        assert mat.ndim == 3 and mat.shape[1] == mat.shape[2]
+        assert vec_weight.shape[0] == mat.shape[0]
+        if vec_bias is None:
+            if vec_weight.ndim == 1 and mat.shape[1] == 1:
+                # for BatchNormNd and LayerNorm
+                # mat (f, 1, 1), vec_weight (f,)
+                mvp_w = mat.squeeze(dim=(1, 2)) * vec_weight  # (f,)
+            elif vec_weight.ndim == 2 and mat.shape[1] == vec_weight.shape[1]:
+                # mat (f_out, f_in, f_in), vec_weight (f_out, f_in)
+                v = vec_weight.unsqueeze(2)  # (f_out, f_in, 1)
+                mvp_w = torch.matmul(mat, v).squeeze(2)  # (f, f_in)
+            else:
+                raise ValueError(
+                    f"Unimplemented shapes {vec_weight.shape=}, {mat.shape=} for "
+                    "unit-wise."
+                )
+            if inplace:
+                vec_weight.copy_(mvp_w)
+            return mvp_w
         else:
-            v = torch.hstack([vec_weight, vec_bias.unsqueeze(dim=1)])  # (f_out, f_in+1)
-            v = v.unsqueeze(2)  # (f_out, f_in+1, 1)
-            mvp_wb = torch.matmul(mat, v).squeeze(2)  # (f_out, f_in+1)
-            mvp_w = mvp_wb[:, :-1]
-            mvp_b = mvp_wb[:, -1]
-
-        if inplace:
-            vec_weight.copy_(mvp_w)
-            vec_bias.copy_(mvp_b)
-        return mvp_w, mvp_b
+            assert vec_weight.shape[0] == vec_bias.shape[0]
+            assert vec_bias.ndim == 1
+            if vec_weight.ndim == 1 and mat.shape[1] == 2:
+                # mat (f, 2, 2), vec_weight (f,), vec_bias (f,)
+                v = torch.stack([vec_weight, vec_bias], dim=1)  # (f, 2)
+                v = v.unsqueeze(2)  # (f, 2, 1)
+                mvp_wb = torch.matmul(mat, v).squeeze(2)  # (f, 2)
+                mvp_w = mvp_wb[:, 0]  # (f,)
+                mvp_b = mvp_wb[:, 1]  # (f,)
+            elif vec_weight.ndim == 2 and mat.shape[1] == vec_weight.shape[1] + 1:
+                # mat (f_out, f_in+1, f_in+1), vec_weight (f_out, f_in), vec_bias (f_out,)
+                v = torch.hstack(
+                    [vec_weight, vec_bias.unsqueeze(dim=1)]
+                )  # (f_out, f_in+1)
+                v = v.unsqueeze(2)  # (f_out, f_in+1, 1)
+                mvp_wb = torch.matmul(mat, v).squeeze(2)  # (f_out, f_in+1)
+                mvp_w = mvp_wb[:, :-1]  # (f_out, f_in)
+                mvp_b = mvp_wb[:, -1]  # (f_out, )
+            else:
+                raise ValueError(
+                    f"Unimplemented shapes {vec_weight.shape=}, {vec_bias.shape=}, "
+                    f"{mat.shape=} for unit-wise."
+                )
+            if inplace:
+                vec_weight.copy_(mvp_w)
+                vec_bias.copy_(mvp_b)
+            return mvp_w, mvp_b
 
 
 class Diag:
