@@ -115,6 +115,74 @@ def smw_inv(x, damping=1e-7):
     return (I - xt_Ginv_x) / damping  # d x d
 
 
+def psd_damping(
+    psd: torch.Tensor, damping_or_target_condition: float
+) -> torch.Tensor | float:
+    """Determine the damping of positive semi-definite matrix (batch).
+
+    Given either fixed damping or target condition number (as negated value), this
+    computes the correct damping for the given matrix (batch).
+
+    Args:
+        psd (torch.Tensor): real symmetric square psd matrix (batch)
+        damping_or_target_condition (float): Damping value or target condition number as
+            negated value
+
+    Returns:
+        torch.Tensor | float: float for fixed damping and tensor of batch shape in case
+            of computed damping for condition number
+    """
+    if damping_or_target_condition >= -0.0:
+        return damping_or_target_condition
+    if damping_or_target_condition >= -1:
+        raise ValueError(
+            "Got negative damping, i.e. target condition number, but value "
+            f"{damping_or_target_condition} in [-1, 0); Condition number must be > 1."
+        )
+    target_cond = -damping_or_target_condition
+    failed_eigvalsh = False
+    try:
+        max_eig = torch.linalg.eigvalsh(psd)[..., [-1]]
+    except torch._C._LinAlgError:
+        failed_eigvalsh = True
+    if failed_eigvalsh or not max_eig.isfinite().all():
+        # probably has failed due to multiple (near) zero eigenvalues
+        # https://pytorch.org/docs/stable/notes/numerical_accuracy.html
+        # retry with svdvals (sorted descending)
+        max_eig = torch.linalg.svdvals(psd)[..., [0]]
+    damping = target_cond_to_damping(target=target_cond, max_eigenvalue=max_eig)
+    return damping
+
+
+def target_cond_to_damping(
+    target: torch.Tensor | float, max_eigenvalue: torch.Tensor
+) -> torch.Tensor:
+    """Convert target condition number(s) into damping value(s)
+
+    In case of max_eigevalue == 0, i.e. zero matrix, damping will be set to 1.
+
+    Args:
+        target (torch.Tensor | float): Condition number target(s) > 1
+        max_eigenvalue (torch.Tensor): Largest eigenvalue(s) >= 0
+
+    Returns:
+        torch.Tensor: Damping value(s)
+    """
+    # Assume that smallest eigenvalue is zero.
+    # condition = (max + d) / (0 + d) -> d = max / (target - 1)
+    # If each matrix has much lower condition number already, then adding some
+    # damping won't change much.
+    # If each matrix has far higher condition number, then damping will overwhelm
+    # difference between true smallest eigval and zero anyway.
+    # At worst, each matrix already has target condition number minus one, such that
+    # the damped condition number is half of the desired,
+    # condition = (max + d) / ( max/(target-1) + d)
+    #           = ( (target-1)max + max)/(target-1) ) / ( 2max/(target-1) )
+    #           = ( target * max ) / (2max) = target / 2
+    damping = max_eigenvalue / (target - 1)
+    # set damping to one for zero max eigenvalue and therefore zero damping
+    return damping + (damping == 0.0).float()
+
 class PseudoBatchLoaderGenerator:
     """
     Example::
