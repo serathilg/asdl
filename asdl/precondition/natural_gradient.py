@@ -666,6 +666,8 @@ class NaturalGradientMaker(PreconditionedGradientMaker):
     def is_module_for_inv_and_precondition(self, module: nn.Module):
         if module not in self.modules_for_curvature:
             return False
+        if not any(p.requires_grad for p in module.parameters(recurse=False)):
+            return False
         module_partitions = self.module_partitions
         if module_partitions is None:
             return True

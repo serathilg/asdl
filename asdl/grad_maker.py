@@ -571,10 +571,29 @@ class GradientMaker:
                 f"Invalid loss type: {loss_type}. "
                 f"{[LOSS_CROSS_ENTROPY, LOSS_MSE, LOSS_MVN_NLL]} are supported."
             )
-        logit_fn, params = self._get_stateless_logit_fn_params_only()
+        logit_fn, all_params = self._get_stateless_logit_fn_params_only()
+
+        # Exclude params from jvp and backward that do not require grad
+        does_param_req_grad = [p.requires_grad for p in all_params]
+
+        def logit_fn_req_grad(params_req_grad):
+            combined_params = []
+            req_grad_idx = 0
+            for i, req_grad in enumerate(does_param_req_grad):
+                if req_grad:
+                    combined_params.append(params_req_grad[req_grad_idx])
+                    req_grad_idx += 1
+                else:
+                    combined_params.append(all_params[i])
+            return logit_fn(combined_params)
+
         if tangents is None:
             tangents = self._get_random_tangents()
-        y, jvp = torch.func.jvp(logit_fn, (params,), (tangents,))
+            tangents = tuple(t for t, p in zip(tangents, all_params) if p.requires_grad)
+
+        params = tuple(p for p in all_params if p.requires_grad)
+
+        y, jvp = torch.func.jvp(logit_fn_req_grad, (params,), (tangents,))
         if y.ndim != 2:  # n x c
             raise ValueError(f"Number of output dimensions has to be 2. Got {y.ndim}.")
         if data_size is None:
